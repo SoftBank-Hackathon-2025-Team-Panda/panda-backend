@@ -36,6 +36,9 @@ public class DeploymentPipelineService {
 
     private final DeploymentEventPublisher eventPublisher;
     private final DeploymentErrorHandler errorHandler;
+    private final EcsDeploymentService ecsDeploymentService;
+    private final BlueGreenDeploymentService blueGreenDeploymentService;
+    private final HealthCheckService healthCheckService;
 
     public void triggerDeploymentPipeline(String deploymentId, GitHubConnection ghConnection, AwsConnection awsConnection,
                                          String owner, String repo, String branch) {
@@ -79,27 +82,23 @@ public class DeploymentPipelineService {
             // ====== Stage 3: ECS Deployment 시작 ======
             stageStartTime = checkTimeout(deploymentId, startTime, stageStartTime, 3);
             stageHelper.stage3Start(ecrImageUri);
-            performEcsDeployment(deploymentId, stageHelper, ecrImageUri);
+            ecsDeploymentService.performEcsDeployment(deploymentId, stageHelper, ecrImageUri, awsConnection);
 
             // ====== Stage 4: CodeDeploy Blue/Green Lifecycle ======
             stageStartTime = checkTimeout(deploymentId, startTime, stageStartTime, 4);
-            // TODO: Blue/Green URL을 AWS API에서 동적으로 조회
-            // 현재: 하드코딩된 URL 사용 (시뮬레이션용)
-            // 구현 필요:
-            // 1. ELBv2Client로 Target Group 조회
-            // 2. ALB DNS 주소 또는 도메인명 조회
-            // 3. Blue/Green Target Group 구분
-            // 4. 실제 서비스 URL 획득
-            // 참고: DeploymentMetadata에 저장하여 결과 조회 시 반환
-            String blueUrl = "http://blue.example.com";
-            String greenUrl = "http://green.example.com";
+
+            // ALB Target Group URL 동적 조회
+            Map<String, String> urls = healthCheckService.getBlueGreenUrls(awsConnection);
+            String blueUrl = urls.getOrDefault("blueUrl", "http://localhost:8080");
+            String greenUrl = urls.getOrDefault("greenUrl", "http://localhost:8081");
+
             stageHelper.stage4Start(ecrImageUri);
-            performBlueGreenDeployment(deploymentId, stageHelper, blueUrl, greenUrl);
+            blueGreenDeploymentService.performBlueGreenDeployment(deploymentId, stageHelper, blueUrl, greenUrl, awsConnection);
 
             // ====== Stage 5: HealthCheck & Traffic Switching ======
             stageStartTime = checkTimeout(deploymentId, startTime, stageStartTime, 5);
             stageHelper.stage5Start(greenUrl);
-            performHealthCheckAndTrafficSwitch(deploymentId, stageHelper, greenUrl);
+            healthCheckService.performHealthCheckAndTrafficSwitch(deploymentId, stageHelper, greenUrl, awsConnection);
 
             // ====== Stage 6: 완료 ======
             checkTimeout(deploymentId, startTime, stageStartTime, 6);
@@ -371,113 +370,4 @@ public class DeploymentPipelineService {
         }
     }
 
-    // ====== Stage 3: ECS Deployment ======
-    private void performEcsDeployment(String deploymentId, StageEventHelper stageHelper, String ecrImageUri) throws Exception {
-        try {
-            // TODO: Stage 3 구현 - ECS 실제 배포
-            // 1. EcsClient 생성 (AWS credentials 사용)
-            // 2. ECS Cluster 확인/생성 (DescribeCluster, CreateCluster)
-            // 3. TaskDefinition 등록 (RegisterTaskDefinition with ecrImageUri)
-            // 4. Service 생성/업데이트 (CreateService, UpdateService)
-            // 5. 배포 상태 Polling (DescribeServices until status == ACTIVE)
-            // 6. 각 단계에서 stageHelper 이벤트 발행
-            // 현재: 시뮬레이션만 구현됨
-            Thread.sleep(500);  // Simulate ECS operations
-            stageHelper.stage3ServiceCreated("panda-service", "panda-cluster");
-            Thread.sleep(500);
-            stageHelper.stage3ServiceUpdated("panda-service");
-            log.info("ECS deployment completed for deploymentId: {}", deploymentId);
-        } catch (InterruptedException e) {
-            log.warn("ECS deployment interrupted for deploymentId: {}", deploymentId);
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("ECS deployment interrupted");
-        }
-    }
-
-    // ====== Stage 4: CodeDeploy Blue/Green Lifecycle ======
-    private void performBlueGreenDeployment(String deploymentId, StageEventHelper stageHelper,
-                                            String blueUrl, String greenUrl) throws Exception {
-        try {
-            // TODO: Stage 4 구현 - CodeDeploy Blue/Green 배포
-            // 1. CodeDeployClient 생성
-            // 2. Blue Service 상태 확인 (ECS DescribeServices)
-            // 3. Green Service 생성 (새로운 ECS Task)
-            // 4. CodeDeploy Deployment 생성 (CreateDeployment)
-            // 5. Lifecycle Events Polling (GetDeployment)
-            //    - BeforeAllowTraffic: 유효성 검사 실행
-            //    - AfterAllowTraffic: 트래픽 전환 준비
-            // 6. Deployment 상태 대기 (SUCCESS or FAILURE)
-            // 7. 각 단계에서 stageHelper 이벤트 발행
-            // 현재: 시뮬레이션만 구현됨
-            stageHelper.stage4BlueServiceRunning(blueUrl);
-            Thread.sleep(500);
-
-            stageHelper.stage4GreenServiceSpinning(greenUrl);
-            Thread.sleep(1000);  // Simulate Green service startup
-
-            stageHelper.stage4GreenServiceReady(greenUrl);
-            Thread.sleep(500);
-
-            // Simulate CodeDeploy lifecycle hooks
-            stageHelper.stage4LifecycleHook("BeforeAllowTraffic");
-            Thread.sleep(300);
-
-            stageHelper.stage4LifecycleHook("AfterAllowTraffic");
-            Thread.sleep(300);
-
-            log.info("Blue/Green deployment completed for deploymentId: {}", deploymentId);
-        } catch (InterruptedException e) {
-            log.warn("Blue/Green deployment interrupted for deploymentId: {}", deploymentId);
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Blue/Green deployment interrupted");
-        }
-    }
-
-    // ====== Stage 5: HealthCheck & Traffic Switching ======
-    private void performHealthCheckAndTrafficSwitch(String deploymentId, StageEventHelper stageHelper,
-                                                    String greenUrl) throws Exception {
-        try {
-            // TODO: Stage 5 구현 - 실제 헬스체크 및 트래픽 전환
-            // 1. ElasticLoadBalancingV2Client 생성
-            // 2. 5번 반복 (greenUrl + "/health" 요청):
-            //    - HTTP GET 요청 실행
-            //    - 응답 시간(Latency) 측정
-            //    - Status Code 확인
-            //    - stageHelper 이벤트 발행
-            // 3. 결과 집계:
-            //    - 성공 횟수 / 실패 횟수
-            //    - 평균 레이턴시 계산
-            //    - 에러율 계산
-            // 4. 조건 체크:
-            //    - 성공 > 3회? → Traffic Switch 진행
-            //    - 실패 > 2회? → HealthCheckException 발생
-            // 5. ALB Target Group 업데이트 (Blue 제거, Green 추가)
-            // 6. Traffic Switch 완료 후 메트릭 저장
-            // 현재: 시뮬레이션만 구현됨
-            stageHelper.stage5HealthCheckRunning(greenUrl);
-            Thread.sleep(500);
-
-            // Simulate health checks
-            int passedChecks = 0;
-            for (int i = 1; i <= 5; i++) {
-                Thread.sleep(200);
-                stageHelper.stage5HealthCheckRunning(greenUrl + " - Check " + i + "/5");
-                passedChecks++;
-            }
-
-            stageHelper.stage5HealthCheckPassed(greenUrl, passedChecks);
-            Thread.sleep(300);
-
-            stageHelper.stage5TrafficSwitching("blue", "green");
-            Thread.sleep(500);
-
-            stageHelper.stage5TrafficSwitched("green");
-            log.info("Health check and traffic switch completed for deploymentId: {}", deploymentId);
-        } catch (InterruptedException e) {
-            log.warn("Health check interrupted for deploymentId: {}", deploymentId);
-            stageHelper.stage5HealthCheckFailed(greenUrl, "Process interrupted");
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Health check interrupted");
-        }
-    }
 }

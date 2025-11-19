@@ -1,0 +1,128 @@
+name: Java CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Setup application.yml
+        run: |
+          mkdir -p ./src/main/resources
+          echo "${{ secrets.APPLICATION_YML }}" | base64 --decode > ./src/main/resources/application.yml
+          echo "${{ secrets.APPLICATION_PROD_YML }}" | base64 --decode > ./src/main/resources/application-prod.yml
+
+      - name: Grant execute permission for Gradle Wrapper
+        run: chmod +x ./gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew clean bootJar --no-daemon
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/panda-backend:latest
+            ${{ steps.login-ecr.outputs.registry }}/panda-backend:${{ github.sha }}
+          cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/panda-backend:buildcache
+          cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/panda-backend:buildcache,mode=max
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          port: 22
+          script: |
+            set -euo pipefail
+            APP="panda-backend"
+            REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+            IMAGE="${REGISTRY}/${APP}:latest"
+
+            echo "=========================================="
+            echo "[1] AWS ECR 로그인"
+            echo "=========================================="
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | sudo docker login --username AWS --password-stdin ${REGISTRY}
+
+            echo "=========================================="
+            echo "[2] 기존 컨테이너 정리"
+            echo "=========================================="
+            if sudo docker ps -a --format '{{.Names}}' | grep -q "^${APP}$"; then
+              echo "기존 컨테이너 ${APP} 제거 중..."
+              sudo docker rm -f "${APP}"
+            fi
+
+            echo "=========================================="
+            echo "[3] 최신 이미지 Pull"
+            echo "=========================================="
+            sudo docker pull "${IMAGE}"
+
+            echo "=========================================="
+            echo "[4] 새로운 컨테이너 실행"
+            echo "=========================================="
+            sudo docker run -d \
+              -p 8080:8080 \
+              --name "${APP}" \
+              --restart unless-stopped \
+              "${IMAGE}"
+
+            echo "=========================================="
+            echo "[5] 컨테이너 상태 확인"
+            echo "=========================================="
+            sleep 5
+            if sudo docker ps | grep "${APP}"; then
+              echo "✅ 컨테이너 정상 실행"
+              sudo docker logs "${APP}" --tail 30
+            else
+              echo "❌ 컨테이너 실행 실패"
+              sudo docker logs "${APP}"
+              exit 1
+            fi
+
+            echo "=========================================="
+            echo "[6] 미사용 이미지 정리"
+            echo "=========================================="
+            sudo docker image prune -f
+            echo "✅ 배포 완료"

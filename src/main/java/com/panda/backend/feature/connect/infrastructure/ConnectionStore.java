@@ -12,8 +12,6 @@ import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueReques
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretRequest;
 import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -21,16 +19,11 @@ import java.util.UUID;
 @Component
 public class ConnectionStore {
     // AWS Secrets Manager를 사용하여 토큰 보안 저장
-    // GitHub Token과 AWS Credentials를 Secrets Manager에 저장
-    // connectionId는 메모리에 저장하여 조회 가능하게 함
+    // GitHub Token과 AWS Credentials를 Secrets Manager에 암호화 저장
+    // secretName은 naming rule로 자동 계산: panda/github/{connectionId}, panda/aws/{connectionId}
 
     private final SecretsManagerClient secretsManagerClient;
     private final ObjectMapper objectMapper;
-
-    // connectionId -> secret name 매핑 (메모리)
-    // TODO: 앱 재시작 후에도 저장된 연결 정보를 조회할 수 있도록 RDS/DynamoDB에 connectionId -> secretName 매핑을 영속화하기
-    private final Map<String, String> gitHubConnectionSecrets = new HashMap<>();  // gh_xxx -> secret-name
-    private final Map<String, String> awsConnectionSecrets = new HashMap<>();     // aws_xxx -> secret-name
 
     public ConnectionStore(SecretsManagerClient secretsManagerClient, ObjectMapper objectMapper) {
         this.secretsManagerClient = secretsManagerClient;
@@ -68,8 +61,6 @@ public class ConnectionStore {
                 log.info("GitHub connection created in Secrets Manager: {}", secretName);
             }
 
-            // connectionId -> secretName 매핑만 메모리에 저장
-            gitHubConnectionSecrets.put(connectionId, secretName);
             return connectionId;
 
         } catch (Exception e) {
@@ -109,8 +100,6 @@ public class ConnectionStore {
                 log.info("AWS connection created in Secrets Manager: {}", secretName);
             }
 
-            // connectionId -> secretName 매핑만 메모리에 저장
-            awsConnectionSecrets.put(connectionId, secretName);
             return connectionId;
 
         } catch (Exception e) {
@@ -121,14 +110,12 @@ public class ConnectionStore {
 
     /**
      * GitHub 연결 정보를 Secrets Manager에서 조회
+     * secretName은 명확한 naming rule로 자동 계산
      */
     public Optional<GitHubConnection> getGitHubConnection(String connectionId) {
         try {
-            String secretName = gitHubConnectionSecrets.get(connectionId);
-            if (secretName == null) {
-                log.warn("GitHub connection not found: {}", connectionId);
-                return Optional.empty();
-            }
+            // naming rule로 secretName 자동 계산
+            String secretName = "panda/github/" + connectionId;
 
             GetSecretValueRequest request = GetSecretValueRequest.builder()
                     .secretId(secretName)
@@ -144,7 +131,7 @@ public class ConnectionStore {
             return Optional.of(connection);
 
         } catch (ResourceNotFoundException e) {
-            log.warn("Secret not found in Secrets Manager: {}", connectionId);
+            log.warn("GitHub connection not found in Secrets Manager: {}", connectionId);
             return Optional.empty();
         } catch (Exception e) {
             log.error("Failed to retrieve GitHub connection from Secrets Manager", e);
@@ -154,14 +141,12 @@ public class ConnectionStore {
 
     /**
      * AWS 연결 정보를 Secrets Manager에서 조회
+     * secretName은 명확한 naming rule로 자동 계산
      */
     public Optional<AwsConnection> getAwsConnection(String connectionId) {
         try {
-            String secretName = awsConnectionSecrets.get(connectionId);
-            if (secretName == null) {
-                log.warn("AWS connection not found: {}", connectionId);
-                return Optional.empty();
-            }
+            // naming rule로 secretName 자동 계산
+            String secretName = "panda/aws/" + connectionId;
 
             GetSecretValueRequest request = GetSecretValueRequest.builder()
                     .secretId(secretName)
@@ -177,7 +162,7 @@ public class ConnectionStore {
             return Optional.of(connection);
 
         } catch (ResourceNotFoundException e) {
-            log.warn("Secret not found in Secrets Manager: {}", connectionId);
+            log.warn("AWS connection not found in Secrets Manager: {}", connectionId);
             return Optional.empty();
         } catch (Exception e) {
             log.error("Failed to retrieve AWS connection from Secrets Manager", e);
@@ -185,21 +170,4 @@ public class ConnectionStore {
         }
     }
 
-    public Map<String, GitHubConnection> getAllGitHubConnections() {
-        // 프로토타입: 모든 secret을 조회하는 것은 비용이 높으므로, 메모리의 ID만 반환
-        Map<String, GitHubConnection> result = new HashMap<>();
-        for (String connectionId : gitHubConnectionSecrets.keySet()) {
-            getGitHubConnection(connectionId).ifPresent(conn -> result.put(connectionId, conn));
-        }
-        return result;
-    }
-
-    public Map<String, AwsConnection> getAllAwsConnections() {
-        // 프로토타입: 모든 secret을 조회하는 것은 비용이 높으므로, 메모리의 ID만 반환
-        Map<String, AwsConnection> result = new HashMap<>();
-        for (String connectionId : awsConnectionSecrets.keySet()) {
-            getAwsConnection(connectionId).ifPresent(conn -> result.put(connectionId, conn));
-        }
-        return result;
-    }
 }
