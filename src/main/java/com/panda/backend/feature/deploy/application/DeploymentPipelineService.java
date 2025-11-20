@@ -169,25 +169,38 @@ public class DeploymentPipelineService {
         // 또한, 클론 완료 후 임시 디렉토리 정리 필요:
         // - 배포 완료 후 /tmp/deployment_* 디렉토리 삭제
         // - git URL에 포함된 token이 파일에 남아있지 않도록 주의
-        String gitUrl = String.format("https://%s@github.com/%s/%s.git", ghConnection.getToken(), owner, repo);
+        String token = ghConnection.getToken();
+        String gitUrl = String.format("https://%s:x-oauth-basic@github.com/%s/%s.git", token, owner, repo);
         String branchName = branch != null ? branch : "main";
 
-        ProcessBuilder pb = new ProcessBuilder(
-                "git", "clone", "--depth", "1", "-b", branchName, gitUrl, clonePath
-        );
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
+        try {
+            log.info("Cloning repository: {}/{} from branch: {}", owner, repo, branchName);
 
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                log.debug("Git clone: {}", line);
+            // git clone --branch <branch> --depth 1 <url> <path>
+            ProcessBuilder pb = new ProcessBuilder(
+                    "git", "clone", "--branch", branchName, "--depth", "1", gitUrl, clonePath
+            );
+            pb.redirectErrorStream(true);
+
+            Process process = pb.start();
+
+            // stdout/stderr 로깅
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    log.debug("Git clone output: {}", line);
+                }
             }
-        }
 
-        int exitCode = process.waitFor();
-        if (exitCode != 0) {
-            throw new RuntimeException("Failed to clone repository. Exit code: " + exitCode);
+            int exitCode = process.waitFor();
+            if (exitCode != 0) {
+                throw new RuntimeException("Failed to clone repository. Exit code: " + exitCode);
+            }
+
+            log.info("Repository cloned successfully to: {}", clonePath);
+        } catch (Exception e) {
+            log.error("Failed to clone repository: {}/{} - {}", owner, repo, e.getMessage(), e);
+            throw new RuntimeException("Failed to clone repository: " + e.getMessage(), e);
         }
 
         return clonePath;
