@@ -24,7 +24,10 @@ RUN apt-get update && apt-get install -y git docker.io && rm -rf /var/lib/apt/li
 
 COPY --from=builder /build/build/libs/*.jar app.jar
 
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app && \
+    groupadd -f docker && \
+    usermod -aG docker appuser
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
