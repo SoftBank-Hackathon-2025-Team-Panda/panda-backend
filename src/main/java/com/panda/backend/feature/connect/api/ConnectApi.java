@@ -4,9 +4,11 @@ import com.panda.backend.feature.connect.dto.ConnectAwsRequest;
 import com.panda.backend.feature.connect.dto.ConnectAwsResponse;
 import com.panda.backend.feature.connect.dto.ConnectGitHubRequest;
 import com.panda.backend.feature.connect.dto.ConnectGitHubResponse;
+import com.panda.backend.feature.connect.dto.ConnectionsListResponse;
 import com.panda.backend.global.response.ApiResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 
@@ -20,4 +22,8 @@ public interface ConnectApi {
     @PostMapping("/api/v1/connect/aws")
     @Operation(summary = "AWS 계정 연결", description = "AWS 자격증명을 검증하고 연결을 생성합니다.")
     ApiResponse<ConnectAwsResponse> connectAws(@RequestBody ConnectAwsRequest request);
+
+    @GetMapping("/api/v1/connections")
+    @Operation(summary = "저장된 모든 연결 조회", description = "저장된 GitHub 및 AWS 연결 정보를 모두 조회합니다.")
+    ApiResponse<ConnectionsListResponse> getConnections();
 }

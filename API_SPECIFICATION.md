@@ -6,6 +6,9 @@
 3. [응답 형식](#응답-형식)
 4. [에러 처리](#에러-처리)
 5. [Connection API](#connection-api)
+   - [1️⃣ GitHub 레포 연결](#1️⃣-github-레포-연결)
+   - [2️⃣ AWS 계정 연결](#2️⃣-aws-계정-연결)
+   - [3️⃣ 저장된 연결 조회](#3️⃣-저장된-연결-조회)
 6. [Deployment API](#deployment-api)
 7. [SSE 스트리밍 상세](#sse-스트리밍-상세)
 8. [예제 및 시나리오](#예제-및-시나리오)
@@ -25,6 +28,7 @@
 |------|---------|------|
 | **Connection** | `POST /api/v1/connect/github` | GitHub 레포 연결 |
 | **Connection** | `POST /api/v1/connect/aws` | AWS 계정 연결 |
+| **Connection** | `GET /api/v1/connections` | 저장된 모든 연결 조회 |
 | **Deployment** | `POST /api/v1/deploy` | 배포 시작 |
 | **Deployment** | `GET /api/v1/deploy/{id}/events` | 실시간 이벤트 스트리밍 (SSE) |
 | **Deployment** | `GET /api/v1/deploy/{id}/result` | 배포 결과 조회 |
@@ -202,15 +206,6 @@ Content-Type: application/json
 | **branch** | String | ✅ | 사용할 브랜치 | `"main"`, `"develop"` |
 | **token** | String | ✅ | GitHub Personal Access Token | `"ghp_xxxx..."` |
 
-### GitHub Personal Access Token 생성
-1. GitHub 계정 로그인
-2. Settings → Developer settings → Personal access tokens
-3. "Generate new token" 선택
-4. 필요한 권한 선택:
-   - `repo`: 전체 레포지토리 접근
-   - `read:user`: 사용자 정보 읽기
-5. Token 복사 및 저장
-
 ### 응답
 
 #### 성공 (200)
@@ -288,15 +283,6 @@ Content-Type: application/json
 | **secretAccessKey** | String | ✅ | AWS Secret Access Key | `"wJalrXUtnFEMI/K7MDENG/..."` |
 | **sessionToken** | String | ❌ | AWS Session Token (STS 사용 시) | `"FwoGZXIvYXdzEF..."` |
 
-### AWS IAM 자격증명 생성
-1. AWS Management Console 로그인
-2. IAM → Users → [사용자명]
-3. Security credentials → Create access key
-4. Access Key ID와 Secret Access Key 저장
-5. 정책 권한:
-   - ECR (Elastic Container Registry): CreateRepository, GetAuthorizationToken, PutImage
-   - ECS (Elastic Container Service): CreateService, UpdateService
-   - STS (Secure Token Service): GetCallerIdentity
 
 ### 응답
 
@@ -339,9 +325,81 @@ Content-Type: application/json
 
 ---
 
+## 3️⃣ 저장된 연결 조회
+
+### 엔드포인트
+```
+GET /api/v1/connections
+```
+
+### 설명
+이전에 저장한 GitHub 및 AWS 연결 정보를 모두 조회합니다.
+배포 요청 시 connectionId를 선택하거나, 클라이언트가 이전 연결 정보를 재사용할 때 사용됩니다.
+
+### 요청
+
+#### Headers
+```
+Content-Type: application/json
+```
+
+### 응답
+
+#### 성공 (200)
+```json
+{
+  "code": 200,
+  "message": "연결 정보를 조회했습니다.",
+  "data": {
+    "github": [
+      {
+        "connectionId": "gh_a1b2c3d4e5",
+        "owner": "your-org",
+        "repo": "your-repo",
+        "branch": "main"
+      }
+    ],
+    "aws": [
+      {
+        "connectionId": "aws_f6g7h8i9j0",
+        "region": "ap-northeast-2"
+      }
+    ]
+  }
+}
+```
+
+#### 응답 필드
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| **code** | Integer | HTTP 상태 코드 |
+| **message** | String | 성공 메시지 |
+| **data.github** | Array | GitHub 연결 목록 |
+| **data.github[].connectionId** | String | GitHub 연결 ID |
+| **data.github[].owner** | String | GitHub 조직명 또는 사용자명 |
+| **data.github[].repo** | String | GitHub 레포지토리명 |
+| **data.github[].branch** | String | 배포할 브랜치 |
+| **data.aws** | Array | AWS 연결 목록 |
+| **data.aws[].connectionId** | String | AWS 연결 ID |
+| **data.aws[].region** | String | AWS 리전 |
+
+#### 저장된 연결이 없는 경우 (200)
+```json
+{
+  "code": 200,
+  "message": "연결 정보를 조회했습니다.",
+  "data": {
+    "github": [],
+    "aws": []
+  }
+}
+```
+
+---
+
 # Deployment API
 
-## 3️⃣ 배포 시작
+## 4️⃣ 배포 시작
 
 ### 엔드포인트
 ```
@@ -434,7 +492,7 @@ Content-Type: application/json
 
 ---
 
-## 4️⃣ 배포 실시간 이벤트 스트리밍 (SSE)
+## 5️⃣ 배포 실시간 이벤트 스트리밍 (SSE)
 
 ### 엔드포인트
 ```
@@ -557,7 +615,7 @@ reconnect: 5000
 
 ---
 
-## 5️⃣ 배포 최종 결과 조회
+## 6️⃣ 배포 최종 결과 조회
 
 ### 엔드포인트
 ```
@@ -660,45 +718,6 @@ GET /api/v1/deploy/{deploymentId}/result
   "error": "Deployment Error",
   "message": "Deployment result not found: dep_invalid"
 }
-```
-
-### 사용 예제
-
-#### cURL
-```bash
-curl http://localhost:8080/api/v1/deploy/dep_k1l2m3n4o5/result
-```
-
-#### JavaScript
-```javascript
-const deploymentId = 'dep_k1l2m3n4o5';
-const response = await fetch(`/api/v1/deploy/${deploymentId}/result`);
-const result = await response.json();
-
-if (result.data.status === 'COMPLETED') {
-  console.log('✅ 배포 완료');
-  console.log(`  Green Service: ${result.data.greenUrl}`);
-  console.log(`  소요 시간: ${result.data.durationSeconds}초`);
-  console.log(`  Green 레이턴시: ${result.data.greenLatencyMs}ms`);
-} else {
-  console.error(`❌ 배포 실패: ${result.data.errorMessage}`);
-}
-```
-
-#### Python
-```python
-import requests
-
-deployment_id = 'dep_k1l2m3n4o5'
-response = requests.get(f'http://localhost:8080/api/v1/deploy/{deployment_id}/result')
-result = response.json()
-
-if result['data']['status'] == 'COMPLETED':
-  print('✅ 배포 완료')
-  print(f"  Green Service: {result['data']['greenUrl']}")
-  print(f"  소요 시간: {result['data']['durationSeconds']}초")
-else:
-  print(f"❌ 배포 실패: {result['data']['errorMessage']}")
 ```
 
 ---

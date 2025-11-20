@@ -32,7 +32,12 @@ public class SaveGitHubConnectionService {
                     request.getBranch(),
                     request.getToken()
             );
-            String connectionId = connectionStore.saveGitHubConnection(ghConnection);
+            String connectionId = connectionStore.saveGitHubConnection(
+                    ghConnection,
+                    request.getOwner(),
+                    request.getRepo(),
+                    request.getBranch()
+            );
 
             log.info("GitHub connection saved with ID: {}", connectionId);
             return new ConnectGitHubResponse(connectionId);

@@ -33,7 +33,7 @@ public class SaveAwsConnectionService {
                     request.getSecretAccessKey(),
                     request.getSessionToken()
             );
-            String connectionId = connectionStore.saveAwsConnection(awsConnection);
+            String connectionId = connectionStore.saveAwsConnection(awsConnection, request.getRegion());
 
             log.info("AWS connection saved with ID: {}", connectionId);
             return new ConnectAwsResponse(connectionId);
