@@ -106,6 +106,7 @@ jobs:
               -p 8080:8080 \
               --name "${APP}" \
               --restart unless-stopped \
+              -v /var/run/docker.sock:/var/run/docker.sock \
               "${IMAGE}"
 
             echo "=========================================="
