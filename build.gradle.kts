@@ -38,6 +38,8 @@ dependencies {
 	implementation("software.amazon.awssdk:codedeploy")
 	implementation("software.amazon.awssdk:secretsmanager")
 	implementation("software.amazon.awssdk:sts")
+	implementation("software.amazon.awssdk:eventbridge")
+	implementation("software.amazon.awssdk:iam")
 
 	// GitHub API
 	implementation("org.kohsuke:github-api:1.321")

@@ -25,6 +25,7 @@ public class StartDeploymentService {
     private final DeploymentEventStore deploymentEventStore;
     private final DeploymentEventPublisher eventPublisher;
     private final DeploymentTaskExecutor deploymentTaskExecutor;
+    private final EventBridgeRuleService eventBridgeRuleService;
 
     public DeployResponse start(DeployRequest request) {
         // GitHub 연결 확인
@@ -46,6 +47,23 @@ public class StartDeploymentService {
                 request.getBranch(),
                 awsConnection.getRegion()
         );
+
+        // EventBridge Rule 생성
+        try {
+            eventBridgeRuleService.createEventBridgeRule(
+                    awsConnection.getRegion(),
+                    request.getOwner(),
+                    request.getRepo(),
+                    awsConnection.getAccessKeyId(),
+                    awsConnection.getSecretAccessKey(),
+                    awsConnection.getSessionToken()
+            );
+            log.info("EventBridge rule created for deployment: {}", deploymentId);
+        } catch (Exception e) {
+            log.error("Failed to create EventBridge rule for deployment {}", deploymentId, e);
+            deploymentEventStore.failDeployment(deploymentId, "Failed to create EventBridge rule: " + e.getMessage());
+            throw new RuntimeException("Failed to create EventBridge rule: " + e.getMessage(), e);
+        }
 
         // 배포 작업 생성
         DeploymentTask deploymentTask = new DeploymentTask(
