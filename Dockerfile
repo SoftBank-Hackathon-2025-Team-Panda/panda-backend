@@ -18,8 +18,9 @@ FROM eclipse-temurin:17-jre-jammy
 
 WORKDIR /app
 
-# git 설치 (배포 파이프라인에서 GitHub 저장소 클론 필요)
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+# git 및 docker CLI 설치 (배포 파이프라인에서 필요)
+# docker socket 마운트로 호스트의 docker daemon 사용
+RUN apt-get update && apt-get install -y git docker.io && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/build/libs/*.jar app.jar
 
