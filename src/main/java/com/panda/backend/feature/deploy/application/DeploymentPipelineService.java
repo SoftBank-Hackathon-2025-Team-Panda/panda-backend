@@ -39,6 +39,7 @@ public class DeploymentPipelineService {
     private final EcsDeploymentService ecsDeploymentService;
     private final BlueGreenDeploymentService blueGreenDeploymentService;
     private final HealthCheckService healthCheckService;
+    private final StepFunctionsPollingService stepFunctionsPollingService;
 
     public void triggerDeploymentPipeline(String deploymentId, GitHubConnection ghConnection, AwsConnection awsConnection,
                                          String owner, String repo, String branch) {
@@ -79,31 +80,25 @@ public class DeploymentPipelineService {
             stageHelper.stage2PushStarting(ecrImageUri);
             stageHelper.stage2PushCompleted(ecrImageUri);
 
-            // ====== Stage 3: ECS Deployment 시작 ======
-            stageStartTime = checkTimeout(deploymentId, startTime, stageStartTime, 3);
-            stageHelper.stage3Start(ecrImageUri);
-            ecsDeploymentService.performEcsDeployment(deploymentId, stageHelper, ecrImageUri, awsConnection);
+            // ====== Stage 3~6: Step Functions에서 자동 처리 ======
+            // ECR 푸시 이후 EventBridge → Step Functions 자동 트리거
+            // 파이프라인팀의 자동화 프로세스가 처리:
+            // 1. EnsureInfra: 인프라 점검 및 생성
+            // 2. RegisterTaskAndDeploy: Task Definition 재정의 + CodeDeploy 시작
+            // 3. CheckDeployment: 배포 상태 모니터링
 
-            // ====== Stage 4: CodeDeploy Blue/Green Lifecycle ======
-            stageStartTime = checkTimeout(deploymentId, startTime, stageStartTime, 4);
+            log.info("ECR push completed. EventBridge will trigger Step Functions. Starting polling...");
 
-            // ALB Target Group URL 동적 조회
-            Map<String, String> urls = healthCheckService.getBlueGreenUrls(awsConnection);
-            String blueUrl = urls.getOrDefault("blueUrl", "http://localhost:8080");
-            String greenUrl = urls.getOrDefault("greenUrl", "http://localhost:8081");
+            // ✅ Step Functions 폴링 시작 (비동기)
+            // ExecutionArn은 Step Functions 내부의 Lambda가 Secrets Manager에 저장할 때까지 기다렸다가 조회
+            stepFunctionsPollingService.startPollingAsync(deploymentId);
 
-            stageHelper.stage4Start(ecrImageUri);
-            blueGreenDeploymentService.performBlueGreenDeployment(deploymentId, stageHelper, blueUrl, greenUrl, awsConnection);
+            log.info("Step Functions polling started for deploymentId: {}", deploymentId);
 
-            // ====== Stage 5: HealthCheck & Traffic Switching ======
-            stageStartTime = checkTimeout(deploymentId, startTime, stageStartTime, 5);
-            stageHelper.stage5Start(greenUrl);
-            healthCheckService.performHealthCheckAndTrafficSwitch(deploymentId, stageHelper, greenUrl, awsConnection);
-
-            // ====== Stage 6: 완료 ======
-            checkTimeout(deploymentId, startTime, stageStartTime, 6);
-            stageHelper.stage6Complete("green", blueUrl, greenUrl);
-            eventPublisher.publishSuccessEvent(deploymentId, "green", blueUrl, greenUrl);
+            // NOTE: 폴링은 별도 스레드에서 실행되므로 여기서는 바로 반환
+            // - ExecutionHistory 감시
+            // - 상태 변화 감지 → SSE 이벤트 발행
+            // - SUCCEEDED/FAILED 상태 도달 시 자동 종료
 
         } catch (DeploymentTimeoutException e) {
             log.error("Deployment timeout at stage {}: {}", e.getStage(), e.getMessage());

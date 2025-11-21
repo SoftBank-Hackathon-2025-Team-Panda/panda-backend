@@ -40,6 +40,8 @@ dependencies {
 	implementation("software.amazon.awssdk:sts")
 	implementation("software.amazon.awssdk:eventbridge")
 	implementation("software.amazon.awssdk:iam")
+	implementation("software.amazon.awssdk:sfn")
+	implementation("software.amazon.awssdk:lambda")
 
 	// GitHub API
 	implementation("org.kohsuke:github-api:1.321")

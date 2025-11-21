@@ -92,4 +92,62 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
         }
     }
 
+    @Override
+    public void publishStepFunctionsProgress(String deploymentId, String stepFunctionsStage) {
+        try {
+            String message = mapStepFunctionsStageToMessage(stepFunctionsStage);
+            Integer stageNumber = mapStepFunctionsStageToNumber(stepFunctionsStage);
+
+            DeploymentEvent event = new DeploymentEvent();
+            event.setType("stepFunctionsProgress");
+            event.setMessage(message);
+            event.setDetails(Map.of(
+                "stepFunctionsStage", stepFunctionsStage,
+                "stageNumber", stageNumber,
+                "timestamp", java.time.LocalDateTime.now().toString()
+            ));
+
+            deploymentEventStore.broadcastEvent(deploymentId, event);
+
+            log.info("Step Functions progress published - deploymentId: {}, stage: {}, message: {}",
+                deploymentId, stepFunctionsStage, message);
+
+        } catch (Exception e) {
+            log.error("Failed to publish Step Functions progress for deployment: {}", deploymentId, e);
+        }
+    }
+
+    /**
+     * Step Functions Stage를 사용자 친화적 메시지로 변환
+     */
+    private String mapStepFunctionsStageToMessage(String stage) {
+        return switch (stage) {
+            case "ENSURE_INFRA_IN_PROGRESS" -> "⏳ 인프라 점검 및 생성 진행 중...";
+            case "ENSURE_INFRA_COMPLETED" -> "✅ 인프라 점검 및 생성 완료";
+            case "REGISTER_TASK_IN_PROGRESS" -> "⏳ Task Definition 업데이트 및 배포 시작 중...";
+            case "REGISTER_TASK_COMPLETED" -> "✅ Task Definition 업데이트 완료";
+            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> "⏳ Blue/Green 배포 진행 중...";
+            case "SUCCEEDED" -> "✅ 배포 성공! Green 서버 활성화됨";
+            case "FAILED" -> "❌ 배포 실패";
+            case "RUNNING" -> "⏳ 배포 진행 중...";
+            default -> "⏳ " + stage;
+        };
+    }
+
+    /**
+     * Step Functions Stage를 Stage Number로 변환
+     */
+    private Integer mapStepFunctionsStageToNumber(String stage) {
+        return switch (stage) {
+            case "ENSURE_INFRA_IN_PROGRESS" -> 3;
+            case "ENSURE_INFRA_COMPLETED" -> 3;
+            case "REGISTER_TASK_IN_PROGRESS" -> 4;
+            case "REGISTER_TASK_COMPLETED" -> 4;
+            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> 5;
+            case "SUCCEEDED" -> 6;
+            case "FAILED" -> 6;
+            default -> 3;
+        };
+    }
+
 }
