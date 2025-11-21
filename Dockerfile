@@ -19,7 +19,6 @@ FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
 
 # git 및 docker CLI 설치 (배포 파이프라인에서 필요)
-# docker socket 마운트로 호스트의 docker daemon 사용
 RUN apt-get update && apt-get install -y git docker.io && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/build/libs/*.jar app.jar
@@ -31,7 +30,7 @@ RUN useradd -m -u 1000 appuser && \
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD java -cp app.jar org.springframework.boot.loader.JarLauncher health || exit 1
+    CMD curl -f http://localhost:8080/actuator/health || exit 1
 
 EXPOSE 8080
 
