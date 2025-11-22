@@ -12,6 +12,8 @@ public interface DeploymentEventPublisher {
 
     void publishErrorEvent(String deploymentId, String errorMessage);
 
+    void publishErrorEvent(String deploymentId, String errorMessage, Map<String, Object> errorDetails);
+
     void initializeDeployment(String deploymentId, String owner, String repo, String branch, String awsRegion);
 
     /**

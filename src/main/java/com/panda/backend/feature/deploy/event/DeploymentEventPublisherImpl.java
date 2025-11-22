@@ -61,9 +61,20 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
 
     @Override
     public void publishErrorEvent(String deploymentId, String errorMessage) {
+        publishErrorEvent(deploymentId, errorMessage, null);
+    }
+
+    /**
+     * 에러 이벤트 발행 (상세정보 포함)
+     *
+     * @param deploymentId 배포 ID
+     * @param errorMessage 에러 메시지
+     * @param errorDetails 에러 상세정보 (선택사항)
+     */
+    public void publishErrorEvent(String deploymentId, String errorMessage, Map<String, Object> errorDetails) {
         try {
             // 에러 이벤트 발행
-            deploymentEventStore.sendErrorEvent(deploymentId, errorMessage);
+            deploymentEventStore.sendErrorEvent(deploymentId, errorMessage, errorDetails);
 
             log.warn("Error event published - deploymentId: {}, error: {}",
                      deploymentId, errorMessage);

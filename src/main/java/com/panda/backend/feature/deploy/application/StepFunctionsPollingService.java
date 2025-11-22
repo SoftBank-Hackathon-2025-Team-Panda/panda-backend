@@ -144,7 +144,19 @@ public class StepFunctionsPollingService {
                 log.error("     - Secrets Manager Secret: {}", secretName);
                 log.error("     - Step Functions: 실행 이력");
                 log.error("     - Lambda: lambda_0_register_to_eventbus 로그");
-                eventPublisher.publishErrorEvent(deploymentId, errorMsg);
+
+                // 상세정보와 함께 에러 발행
+                Map<String, Object> errorDetails = Map.of(
+                    "errorCode", "EXECUTION_ARN_NOT_FOUND",
+                    "errorMessage", errorMsg,
+                    "deploymentId", deploymentId,
+                    "owner", owner,
+                    "repo", repo,
+                    "secretName", secretName,
+                    "suggestion", "EventBridge 규칙, Step Functions 실행, Lambda 로그를 확인하세요",
+                    "timestamp", java.time.LocalDateTime.now().toString()
+                );
+                eventPublisher.publishErrorEvent(deploymentId, errorMsg, errorDetails);
                 return;
             }
 
@@ -221,7 +233,19 @@ public class StepFunctionsPollingService {
                         log.error("Step Functions polling exceeded maximum duration for deploymentId: {}", deploymentId);
                         String errorMsg = String.format("Step Functions polling timeout: exceeded %d minutes",
                             maxPollingDurationMs / (60 * 1000));
-                        eventPublisher.publishErrorEvent(deploymentId, errorMsg);
+
+                        // 상세정보와 함께 에러 발행
+                        Map<String, Object> errorDetails = Map.of(
+                            "errorCode", "POLLING_TIMEOUT",
+                            "errorMessage", errorMsg,
+                            "deploymentId", deploymentId,
+                            "elapsedMs", elapsedMs,
+                            "maxDurationMs", maxPollingDurationMs,
+                            "pollCount", pollCount,
+                            "suggestion", "배포가 너무 오래 진행 중입니다. AWS Step Functions를 확인하세요.",
+                            "timestamp", java.time.LocalDateTime.now().toString()
+                        );
+                        eventPublisher.publishErrorEvent(deploymentId, errorMsg, errorDetails);
 
                         // 타임아웃 결과 저장
                         saveTimeoutResult(deploymentId, owner, repo, branch, pollingStartTime, eventCount,
@@ -247,8 +271,18 @@ public class StepFunctionsPollingService {
 
         } catch (Exception e) {
             log.error("Critical error in polling for deploymentId: {}", deploymentId, e);
-            eventPublisher.publishErrorEvent(deploymentId,
-                "Step Functions 모니터링 중 오류 발생: " + e.getMessage());
+            String errorMsg = "Step Functions 모니터링 중 오류 발생: " + e.getMessage();
+
+            // 상세정보와 함께 에러 발행
+            Map<String, Object> errorDetails = Map.of(
+                "errorCode", "POLLING_ERROR",
+                "errorMessage", errorMsg,
+                "exceptionType", e.getClass().getSimpleName(),
+                "exceptionMessage", e.getMessage() != null ? e.getMessage() : "Unknown error",
+                "deploymentId", deploymentId,
+                "timestamp", java.time.LocalDateTime.now().toString()
+            );
+            eventPublisher.publishErrorEvent(deploymentId, errorMsg, errorDetails);
         } finally {
             // 배포 완료 후 Secrets Manager에서 정리
             if (executionArn != null) {

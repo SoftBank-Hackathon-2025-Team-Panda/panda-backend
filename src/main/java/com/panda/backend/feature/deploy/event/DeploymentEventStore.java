@@ -64,11 +64,9 @@ public class DeploymentEventStore {
                             .name(eventType)
                             .reconnectTime(5000);
 
-                    // "stage" 타입만 data 포함, "success"와 "fail"는 message만 전송
-                    if ("stage".equals(eventType)) {
+                    // 모든 이벤트 타입에 전체 데이터 전송 (stage, success, fail 모두)
+                    if ("stage".equals(eventType) || "success".equals(eventType) || "fail".equals(eventType)) {
                         eventBuilder.data(event);
-                    } else if ("success".equals(eventType) || "fail".equals(eventType)) {
-                        eventBuilder.data(Map.of("message", event.getMessage()));
                     }
 
                     emitter.send(eventBuilder);
@@ -124,9 +122,27 @@ public class DeploymentEventStore {
 
     // "fail" 이벤트 전송 (배포 실패)
     public void sendErrorEvent(String deploymentId, String message) {
+        sendErrorEvent(deploymentId, message, null);
+    }
+
+    // "fail" 이벤트 전송 (배포 실패) - 상세정보 포함
+    public void sendErrorEvent(String deploymentId, String message, Map<String, Object> errorDetails) {
         DeploymentEvent event = new DeploymentEvent();
         event.setType("fail");
         event.setMessage(message);
+
+        // 상세정보 설정
+        if (errorDetails != null) {
+            event.setDetails(errorDetails);
+        } else {
+            // 기본 상세정보 설정
+            event.setDetails(Map.of(
+                "message", message,
+                "timestamp", java.time.LocalDateTime.now().toString()
+            ));
+        }
+
+        log.info("📤 [Error Event] type: fail, message: {}, details: {}", message, event.getDetails());
 
         broadcastEvent(deploymentId, event);
 
