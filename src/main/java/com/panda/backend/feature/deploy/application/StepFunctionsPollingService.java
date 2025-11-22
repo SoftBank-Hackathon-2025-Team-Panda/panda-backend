@@ -494,55 +494,21 @@ public class StepFunctionsPollingService {
      */
     private String analyzeTaskStateExited(String deploymentId, HistoryEvent event, AwsConnection awsConnection) {
         try {
-            // ✅ event.toString()에서 output 추출
-            String eventString = event.toString();
-            log.info("📤 [TaskStateExited-EVENT-STRING] Full event: {}",
-                eventString.length() > 800 ? eventString.substring(0, 800) + "..." : eventString);
-
-            String taskOutput = null;
-
-            // 1단계: JSON 형식의 output 문자열 추출
-            // "output={...}" 또는 "output": "{\n...}" 형식에서 추출
-            int outputIdx = eventString.indexOf("output=");
-            if (outputIdx != -1) {
-                int startIdx = outputIdx + 7; // "output=" 다음부터
-                // " 또는 { 문자부터 시작
-                while (startIdx < eventString.length() &&
-                       eventString.charAt(startIdx) != '"' &&
-                       eventString.charAt(startIdx) != '{') {
-                    startIdx++;
-                }
-
-                if (startIdx < eventString.length()) {
-                    // JSON 객체의 끝을 찾기
-                    int braceCount = 0;
-                    int endIdx = startIdx;
-                    boolean inString = false;
-
-                    for (; endIdx < eventString.length(); endIdx++) {
-                        char c = eventString.charAt(endIdx);
-                        if (c == '"' && (endIdx == 0 || eventString.charAt(endIdx - 1) != '\\')) {
-                            inString = !inString;
-                        } else if (!inString) {
-                            if (c == '{') braceCount++;
-                            else if (c == '}') {
-                                braceCount--;
-                                if (braceCount == 0) {
-                                    taskOutput = eventString.substring(startIdx, endIdx + 1);
-                                    log.info("📤 [TaskStateExited-Parsed] output extracted: {}",
-                                        taskOutput.length() > 300 ? taskOutput.substring(0, 300) + "..." : taskOutput);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (taskOutput == null || taskOutput.isEmpty()) {
-                log.debug("TaskStateExited - No output found, returning null");
+            // ✅ AWS SDK getter를 통해 output 직접 추출 (toString() redact 우회)
+            var stateExitedDetails = event.stateExitedEventDetails();
+            if (stateExitedDetails == null) {
+                log.debug("TaskStateExited - No stateExitedEventDetails, returning null");
                 return null;
             }
+
+            String taskOutput = stateExitedDetails.output();
+            if (taskOutput == null || taskOutput.isEmpty()) {
+                log.debug("TaskStateExited - No output from stateExitedEventDetails, returning null");
+                return null;
+            }
+
+            log.info("📤 [TaskStateExited-Direct] Got output from AWS SDK directly: {}",
+                taskOutput.length() > 500 ? taskOutput.substring(0, 500) + "..." : taskOutput);
 
             Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
             // ✅ 전체 output JSON 로깅
@@ -1076,8 +1042,9 @@ public class StepFunctionsPollingService {
 
                         // TaskStateExited에서 추출된 정보를 context에 저장
                         try {
-                            String eventString = event.toString();
-                            String taskOutput = extractFieldFromEventString(eventString, "output");
+                            // ✅ AWS SDK getter를 통해 output 직접 추출
+                            var stateExitedDetails = event.stateExitedEventDetails();
+                            String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
 
                             if (taskOutput != null && !taskOutput.isEmpty()) {
                                 Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
