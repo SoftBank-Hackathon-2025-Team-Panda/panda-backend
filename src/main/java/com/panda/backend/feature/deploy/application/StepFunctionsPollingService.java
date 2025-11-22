@@ -284,32 +284,21 @@ public class StepFunctionsPollingService {
                         break;
                     }
 
-                    // ✅ Stale Event 체크: 새 이벤트가 도착하지 않은 지 너무 오래된 경우
+                    // ✅ Stale Event 체크: 새 이벤트가 도착하지 않은 지 너무 오래된 경우 → DEPLOYMENT_READY로 변경
                     long timeSinceLastNewEvent = System.currentTimeMillis() - lastNewEventTime;
                     if (timeSinceLastNewEvent > staleEventTimeoutMs && lastProcessedEventId > 0) {
-                        log.warn("Step Functions execution appears to be stuck - no new events for {}ms, lastEventId: {}, deploymentId: {}",
+                        log.warn("⏳ [StaleEvent-Detected] Step Functions execution appears to be stuck - no new events for {}ms, lastEventId: {}, deploymentId: {}",
                             timeSinceLastNewEvent, lastProcessedEventId, deploymentId);
-                        String errorMsg = String.format("Step Functions execution stuck: no new events for %d seconds. " +
-                            "Current stage is likely waiting for external intervention or has deadlocked.",
-                            staleEventTimeoutMs / 1000);
+                        log.info("✅ [StaleEvent-AutoReady] Stale Event 감지! DEPLOYMENT_READY 상태로 자동 변경하여 /api/v1/deploy/{}/switch 호출 준비 - deploymentId: {}",
+                            deploymentId, deploymentId);
 
-                        // 상세정보와 함께 에러 발행
-                        Map<String, Object> errorDetails = Map.of(
-                            "errorCode", "EXECUTION_STALLED",
-                            "errorMessage", errorMsg,
-                            "deploymentId", deploymentId,
-                            "lastEventId", lastProcessedEventId,
-                            "stallDurationMs", timeSinceLastNewEvent,
-                            "currentStage", currentStage,
-                            "pollCount", pollCount,
-                            "suggestion", "AWS Step Functions 실행 상태를 확인하고, 필요시 수동으로 실행을 재개하거나 취소하세요.",
-                            "timestamp", java.time.LocalDateTime.now().toString()
-                        );
-                        eventPublisher.publishErrorEvent(deploymentId, errorMsg, errorDetails);
+                        // ✅ Stale Event 감지 시 DEPLOYMENT_READY 상태로 저장 (수동 전환 준비)
+                        saveDeploymentReadyResult(deploymentId, owner, repo, branch,
+                            monitoringContext, pollingStartTime, eventCount, awsConnection);
 
-                        // Stale 상태로 결과 저장
-                        saveTimeoutResult(deploymentId, owner, repo, branch, pollingStartTime, eventCount,
-                            "Step Functions 실행이 진행되지 않음 (stalled)");
+                        // ✅ SSE 연결 종료 신호
+                        deploymentEventStore.sendDoneEvent(deploymentId,
+                            "⏳ CheckDeployment 진행 중: " + (staleEventTimeoutMs / 1000) + "초 이상 응답이 없어 자동으로 DEPLOYMENT_READY 상태로 변경. /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요");
                         break;
                     }
 
