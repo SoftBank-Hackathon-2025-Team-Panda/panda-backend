@@ -505,7 +505,7 @@ public class StepFunctionsPollingService {
         return null;
     }
 
-    private String analyzeTaskStateExited(String deploymentId, HistoryEvent event, AwsConnection awsConnection) {
+    private String analyzeTaskStateExited(String deploymentId, HistoryEvent event, AwsConnection awsConnection, Map<String, Object> monitoringContext) {
         try {
             var stateExitedDetails = event.stateExitedEventDetails();
             if (stateExitedDetails == null) return null;
@@ -575,6 +575,9 @@ public class StepFunctionsPollingService {
 
                 // 파싱된 메트릭을 outputMap에 저장
                 outputMap.putAll(context);
+
+                // 🔥 RunMetrics 파싱 결과를 monitoringContext에 merge
+                monitoringContext.putAll(context);
 
                 return null; // stage 변화 없음
             }
@@ -1198,7 +1201,7 @@ public class StepFunctionsPollingService {
                     String taskName = stateExitedDetails != null ? stateExitedDetails.name() : null;
                     String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
 
-                    String stage = analyzeTaskStateExited(deploymentId, event, awsConnection);
+                    String stage = analyzeTaskStateExited(deploymentId, event, awsConnection, context);
                     if (stage != null) {
                         currentStage = stage;
                     }
