@@ -933,6 +933,28 @@ GET /api/v1/deploy/{deploymentId}/result
 }
 ```
 
+#### Stage 4 완료 - 최종 상태
+```json
+{
+  "type": "success",
+  "message": "배포가 성공했습니다.",
+  "details": {
+    "stage": 4
+  }
+}
+```
+
+또는 실패 시:
+```json
+{
+  "type": "fail",
+  "message": "배포가 실패했습니다.",
+  "details": {
+    "stage": 4
+  }
+}
+```
+
 ### Stage 5: HealthCheck & 트래픽 전환
 
 #### Stage 시작

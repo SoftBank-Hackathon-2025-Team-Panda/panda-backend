@@ -66,7 +66,7 @@ public class StartDeploymentService {
                 "[Step 1] EventBridge 규칙 생성 완료");
         } catch (Exception e) {
             log.error("Failed to create EventBridge rule for deployment {}", deploymentId, e);
-            deploymentEventStore.failDeployment(deploymentId, "EventBridge 규칙 생성 실패: " + e.getMessage());
+            eventPublisher.publishErrorEvent(deploymentId, "EventBridge 규칙 생성 실패: " + e.getMessage());
             throw new RuntimeException("Failed to create EventBridge rule: " + e.getMessage(), e);
         }
 
@@ -95,7 +95,7 @@ public class StartDeploymentService {
 
         } catch (Exception e) {
             log.error("Failed to register Event Bus permission for deployment {}", deploymentId, e);
-            deploymentEventStore.failDeployment(deploymentId,
+            eventPublisher.publishErrorEvent(deploymentId,
                 "Event Bus 권한 설정 실패: " + e.getMessage());
             throw new RuntimeException("Failed to register Event Bus permission: " + e.getMessage(), e);
         }
@@ -120,7 +120,7 @@ public class StartDeploymentService {
             log.info("Deployment {} started successfully", deploymentId);
         } catch (Exception e) {
             log.error("Failed to start deployment {}", deploymentId, e);
-            deploymentEventStore.failDeployment(deploymentId, "배포 시작 실패: " + e.getMessage());
+            eventPublisher.publishErrorEvent(deploymentId, "배포 시작 실패: " + e.getMessage());
             throw new RuntimeException("Failed to start deployment: " + e.getMessage(), e);
         }
 

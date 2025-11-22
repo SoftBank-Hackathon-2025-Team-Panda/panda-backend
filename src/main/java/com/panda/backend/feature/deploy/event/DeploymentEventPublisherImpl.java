@@ -21,9 +21,6 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
     @Override
     public void publishStageEvent(String deploymentId, Integer stage, String message, Map<String, Object> details) {
         try {
-            // Stage 업데이트
-            deploymentEventStore.updateStage(deploymentId, stage);
-
             // 이벤트 생성 및 발행
             DeploymentEvent event = new DeploymentEvent();
             event.setType("stage");
@@ -43,9 +40,6 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
     @Override
     public void publishSuccessEvent(String deploymentId, String finalService, String blueUrl, String greenUrl) {
         try {
-            // 메타데이터 업데이트
-            deploymentEventStore.completeDeployment(deploymentId, finalService, blueUrl, greenUrl);
-
             // 성공 이벤트 발행
             DeploymentEvent event = new DeploymentEvent();
             event.setType("done");
@@ -68,9 +62,6 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
     @Override
     public void publishErrorEvent(String deploymentId, String errorMessage) {
         try {
-            // 메타데이터 업데이트
-            deploymentEventStore.failDeployment(deploymentId, errorMessage);
-
             // 에러 이벤트 발행
             deploymentEventStore.sendErrorEvent(deploymentId, errorMessage);
 
@@ -83,13 +74,8 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
 
     @Override
     public void initializeDeployment(String deploymentId, String owner, String repo, String branch, String awsRegion) {
-        try {
-            deploymentEventStore.initializeMetadata(deploymentId, owner, repo, branch, awsRegion);
-            log.info("Deployment initialized - deploymentId: {}, owner: {}, repo: {}",
-                     deploymentId, owner, repo);
-        } catch (Exception e) {
-            log.error("Failed to initialize deployment: {}", deploymentId, e);
-        }
+        log.info("Deployment initialized - deploymentId: {}, owner: {}, repo: {}",
+                 deploymentId, owner, repo);
     }
 
     @Override
