@@ -59,9 +59,9 @@ public class DeployController implements DeployApi {
             DeploymentResult result = getDeploymentResultService.getResult(deploymentId);
 
             // 배포 준비 상태 확인
-            if (!result.isDeploymentReady()) {
-                throw new IllegalArgumentException("배포가 준비되지 않았습니다. 현재 상태: " + result.getStatus());
-            }
+            //if (!result.isDeploymentReady()) {
+            //    throw new IllegalArgumentException("배포가 준비되지 않았습니다. 현재 상태: " + result.getStatus());
+            //}
 
             // AWS 연결 정보 확인
             if (result.getAwsAccessKeyId() == null || result.getAwsSecretAccessKey() == null) {
