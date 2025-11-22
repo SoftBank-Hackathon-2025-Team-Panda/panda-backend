@@ -170,10 +170,11 @@ public class StepFunctionsPollingService {
                 long pollStartTime = System.currentTimeMillis();
 
                 try {
-                    // GetExecutionHistory API 호출
+                    // GetExecutionHistory API 호출 (includeExecutionData=true로 Task output 포함)
                     GetExecutionHistoryResponse history = sfnClient.getExecutionHistory(
                         GetExecutionHistoryRequest.builder()
                             .executionArn(executionArn)
+                            .includeExecutionData(true)  // ✅ Task output 데이터 포함
                             .build()
                     );
 
@@ -938,6 +939,19 @@ public class StepFunctionsPollingService {
 
                 // TaskStateExited 이벤트 (Task 완료) - awsConnection 전달
                 if (event.typeAsString() != null && event.typeAsString().equals("TaskStateExited")) {
+                    // TaskStateExited에서 output 파싱하여 로깅
+                    try {
+                        String eventString = event.toString();
+                        String taskOutput = extractFieldFromEventString(eventString, "output");
+                        if (taskOutput != null && !taskOutput.isEmpty()) {
+                            log.info("📤 [Event-Detail] TaskStateExited - eventId: {}, timestamp: {}, output: {}",
+                                event.id(), eventTimestamp,
+                                taskOutput.length() > 500 ? taskOutput.substring(0, 500) + "..." : taskOutput);
+                        }
+                    } catch (Exception e) {
+                        log.debug("Failed to extract output from TaskStateExited", e);
+                    }
+
                     String stage = analyzeTaskStateExited(deploymentId, event, awsConnection);
                     if (stage != null) {
                         currentStage = stage;
