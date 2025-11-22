@@ -121,6 +121,10 @@ public class StepFunctionsPollingService {
         String secretName = "panda/stepfunctions/" + owner.toLowerCase() + "-" + repo.toLowerCase() + "-latest-execution";
         String branch = "main";  // Default branch
 
+        // ✅ CheckDeployment 자동 완료용 타이머
+        long checkDeploymentDetectedTime = -1;  // CheckDeployment 감지 시간
+        final long AUTO_WAIT_DURATION_MS = 3 * 60 * 1000;  // 3분
+
         // CloudWatch 모니터링용 컨텍스트
         Map<String, Object> monitoringContext = new HashMap<>();
 
@@ -236,16 +240,32 @@ public class StepFunctionsPollingService {
                         eventCount++;
                     }
 
-                    // ✅ CheckDeployment에서 WAITING_APPROVAL 상태 감지 (배포 준비 완료)
-                    if ("DEPLOYMENT_READY".equals(currentStage)) {
-                        log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
-                        // 배포 준비 완료 상태로 저장 (수동 전환 대기)
-                        saveDeploymentReadyResult(deploymentId, owner, repo, branch,
-                            monitoringContext, pollingStartTime, eventCount, awsConnection);
+                    // ✅ CheckDeployment 감지 후 타이머 시작
+                    if ("DEPLOYMENT_READY".equals(currentStage) && checkDeploymentDetectedTime == -1) {
+                        checkDeploymentDetectedTime = System.currentTimeMillis();
+                        log.info("🔄 [AutoDeploy-3min] CheckDeployment 감지! 3분 자동 대기 시작 - deploymentId: {}", deploymentId);
+                    }
 
-                        // ✅ SSE 연결 종료 신호: success 이벤트 발행 (프론트가 SSE를 종료하기 위함)
-                        deploymentEventStore.sendDoneEvent(deploymentId, "Deployment ready for manual traffic switch");
-                        break;  // ✅ 폴링 종료
+                    // ✅ CheckDeployment 감지 후 3분 경과 확인
+                    if ("DEPLOYMENT_READY".equals(currentStage) && checkDeploymentDetectedTime != -1) {
+                        long elapsedMs = System.currentTimeMillis() - checkDeploymentDetectedTime;
+                        long remainingMs = AUTO_WAIT_DURATION_MS - elapsedMs;
+
+                        log.info("⏳ [AutoDeploy-3min-Countdown] CheckDeployment 감지 후 경과: {}ms/{}, 남은 시간: {}초",
+                            elapsedMs, AUTO_WAIT_DURATION_MS, remainingMs / 1000);
+
+                        // 3분이 지났으면 자동 완료
+                        if (elapsedMs >= AUTO_WAIT_DURATION_MS) {
+                            log.info("✅ [AutoDeploy-3min-Complete] 3분 경과! 자동으로 DEPLOYMENT_READY 상태로 저장 - deploymentId: {}", deploymentId);
+
+                            // 배포 준비 완료 상태로 저장 (수동 전환 대기)
+                            saveDeploymentReadyResult(deploymentId, owner, repo, branch,
+                                monitoringContext, pollingStartTime, eventCount, awsConnection);
+
+                            // ✅ SSE 연결 종료 신호: success 이벤트 발행
+                            deploymentEventStore.sendDoneEvent(deploymentId, "✅ 3분 자동 대기 완료! DEPLOYMENT_READY 상태로 저장됨. /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요");
+                            break;  // ✅ 폴링 종료
+                        }
                     }
 
                     // Stage 4 완료 시 배포 완료 (RegisterTaskAndDeploy 만 완료)
@@ -558,91 +578,11 @@ public class StepFunctionsPollingService {
                 return "REGISTER_TASK_COMPLETED";
             }
 
-            // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지
+            // ✅ CheckDeployment Task 감지 (3분 자동 대기)
             if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
-                // 📍 경로: output → Payload → status (그리고 checkResult)
-                Object statusObj = null;
-                Map<String, Object> payloadMap = null;
-                Map<String, Object> checkResultSource = null;
-
-                // 1단계: Payload 추출
-                if (outputMap.containsKey("Payload")) {
-                    payloadMap = (Map<String, Object>) outputMap.get("Payload");
-                    log.info("📤 [CheckDeployment-Step1] Payload found in outputMap");
-                } else {
-                    log.info("📤 [CheckDeployment-Step1] No Payload in outputMap, current structure: {}",
-                        objectMapper.writeValueAsString(outputMap));
-                }
-
-                // 2단계: Payload에서 status 추출
-                if (payloadMap != null && payloadMap.containsKey("status")) {
-                    statusObj = payloadMap.get("status");
-                    log.info("📤 [CheckDeployment-Step2] Status found in Payload: {}", statusObj);
-                }
-
-                // 3단계: Payload에서 checkResult 추출
-                if (payloadMap != null && payloadMap.containsKey("checkResult")) {
-                    checkResultSource = (Map<String, Object>) payloadMap.get("checkResult");
-                    log.info("📤 [CheckDeployment-Step3] CheckResult found in Payload: {}",
-                        objectMapper.writeValueAsString(checkResultSource));
-                }
-
-                // ✅ 최종 상태 확인
-                log.info("📤 [CheckDeployment-Status-Check] statusObj: {}, deploymentStatus: {}, fullOutput: {}",
-                    statusObj,
-                    checkResultSource != null ? checkResultSource.get("deploymentStatus") : "N/A",
-                    objectMapper.writeValueAsString(outputMap));
-
-                // WAITING_APPROVAL 감지
-                if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
-                    String deploymentStatus = checkResultSource != null ? (String) checkResultSource.get("deploymentStatus") : null;
-                    log.info("✅ [CheckDeployment-DETECTED] Status: WAITING_APPROVAL, DeploymentStatus: {}, deploymentId: {}",
-                        deploymentStatus, deploymentId);
-                    log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
-                    log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
-
-                    // Blue/Green 서비스 정보 추출
-                    String blueUrl = null;
-                    String greenUrl = null;
-                    String blueServiceArn = null;
-                    String greenServiceArn = null;
-
-                    if (checkResultSource != null) {
-                        log.info("📤 [CheckDeployment-CheckResult] checkResult details: {}",
-                            objectMapper.writeValueAsString(checkResultSource));
-                        if (checkResultSource.containsKey("blueTargetGroupArn")) {
-                            blueServiceArn = (String) checkResultSource.get("blueTargetGroupArn");
-                        }
-                        if (checkResultSource.containsKey("greenTargetGroupArn")) {
-                            greenServiceArn = (String) checkResultSource.get("greenTargetGroupArn");
-                        }
-                        if (checkResultSource.containsKey("deploymentStatus")) {
-                            log.info("📤 [CheckDeployment-DeploymentStatus] deploymentStatus: {}",
-                                checkResultSource.get("deploymentStatus"));
-                        }
-                    }
-
-                    // outputMap에서 URL 추출
-                    if (outputMap.containsKey("blueUrl")) {
-                        blueUrl = (String) outputMap.get("blueUrl");
-                    }
-                    if (outputMap.containsKey("greenUrl")) {
-                        greenUrl = (String) outputMap.get("greenUrl");
-                    }
-
-                    // 배포 준비 완료 이벤트 발행
-                    Map<String, Object> readyDetails = new HashMap<>();
-                    readyDetails.put("stage", 4);
-                    if (blueServiceArn != null) readyDetails.put("blueServiceArn", blueServiceArn);
-                    if (greenServiceArn != null) readyDetails.put("greenServiceArn", greenServiceArn);
-                    if (blueUrl != null) readyDetails.put("blueUrl", blueUrl);
-                    if (greenUrl != null) readyDetails.put("greenUrl", greenUrl);
-                    readyDetails.put("message", "POST /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요");
-
-                    publishStageEvent(deploymentId, 4, "Green 서비스 배포 완료 - 트래픽 전환 대기 중", readyDetails);
-
-                    return "DEPLOYMENT_READY";
-                }
+                log.info("✅ [CheckDeployment-Detected] CheckDeployment Task 시작! 3분 자동 대기 후 DEPLOYMENT_READY 상태로 변경됨 - deploymentId: {}", deploymentId);
+                log.info("📤 [CheckDeployment-Output] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
+                return "DEPLOYMENT_READY";
             }
 
         } catch (Exception e) {
@@ -1138,68 +1078,14 @@ public class StepFunctionsPollingService {
                                     }
                                 }
 
-                                // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지 및 stage 반환
+                                // ✅ CheckDeployment Task 감지 (3분 자동 대기)
                                 if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
-                                    // 📍 경로: output → Payload → status (그리고 checkResult)
-                                    Object statusObj = null;
-                                    Map<String, Object> payloadMap = null;
-                                    Map<String, Object> checkResultSource = null;
+                                    log.info("✅ [CheckDeployment-Detected-Polling] CheckDeployment Task 감지! 3분 자동 대기 후 DEPLOYMENT_READY 상태로 변경 - deploymentId: {}", deploymentId);
+                                    log.info("📤 [CheckDeployment-Output-Polling] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
 
-                                    // 1단계: Payload 추출
-                                    if (outputMap.containsKey("Payload")) {
-                                        payloadMap = (Map<String, Object>) outputMap.get("Payload");
-                                        log.info("📤 [CheckDeployment-Polling-Step1] Payload found in outputMap");
-                                    }
-
-                                    // 2단계: Payload에서 status 추출
-                                    if (payloadMap != null && payloadMap.containsKey("status")) {
-                                        statusObj = payloadMap.get("status");
-                                        log.info("📤 [CheckDeployment-Polling-Step2] Status found in Payload: {}", statusObj);
-                                    }
-
-                                    // 3단계: Payload에서 checkResult 추출
-                                    if (payloadMap != null && payloadMap.containsKey("checkResult")) {
-                                        checkResultSource = (Map<String, Object>) payloadMap.get("checkResult");
-                                        log.info("📤 [CheckDeployment-Polling-Step3] CheckResult found in Payload: {}",
-                                            objectMapper.writeValueAsString(checkResultSource));
-                                    }
-
-                                    // ✅ 전체 JSON 로깅
-                                    log.info("📤 [CheckDeployment-FULL-JSON] statusObj: {}, deploymentStatus: {}, fullOutput: {}",
-                                        statusObj,
-                                        checkResultSource != null ? checkResultSource.get("deploymentStatus") : "N/A",
-                                        objectMapper.writeValueAsString(outputMap));
-
-                                    if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
-                                        String deploymentStatus = checkResultSource != null ? (String) checkResultSource.get("deploymentStatus") : null;
-                                        log.info("✅ [CheckDeployment-DETECTED-POLLING] Status: WAITING_APPROVAL, DeploymentStatus: {}, deploymentId: {}",
-                                            deploymentStatus, deploymentId);
-                                        log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
-                                        log.info("Deployment ready - extracting Blue/Green info for context");
-
-                                        if (checkResultSource != null) {
-                                            log.info("📤 [CheckDeployment-CheckResult-Detail] {}",
-                                                objectMapper.writeValueAsString(checkResultSource));
-                                            if (checkResultSource.containsKey("blueTargetGroupArn")) {
-                                                context.put("blueServiceArn", checkResultSource.get("blueTargetGroupArn"));
-                                            }
-                                            if (checkResultSource.containsKey("greenTargetGroupArn")) {
-                                                context.put("greenServiceArn", checkResultSource.get("greenTargetGroupArn"));
-                                            }
-                                        }
-
-                                        // outputMap에서 URL 추출
-                                        if (outputMap.containsKey("blueUrl")) {
-                                            context.put("blueUrl", outputMap.get("blueUrl"));
-                                        }
-                                        if (outputMap.containsKey("greenUrl")) {
-                                            context.put("greenUrl", outputMap.get("greenUrl"));
-                                        }
-
-                                        // ✅ DEPLOYMENT_READY stage로 업데이트하여 polling 종료
-                                        currentStage = "DEPLOYMENT_READY";
-                                        return new PollingResult(currentStage, maxEventId);
-                                    }
+                                    // ✅ DEPLOYMENT_READY stage로 업데이트
+                                    currentStage = "DEPLOYMENT_READY";
+                                    return new PollingResult(currentStage, maxEventId);
                                 }
                             }
                         } catch (Exception e) {
@@ -1219,48 +1105,6 @@ public class StepFunctionsPollingService {
         return new PollingResult(currentStage, maxEventId);  // ✅ PollingResult 반환
     }
 
-    /**
-     * CloudWatch 메트릭 모니터링 실행
-     */
-    private void monitorCloudWatchMetrics(String deploymentId, AwsConnection awsConnection,
-                                          String blueServiceArn, String greenServiceArn,
-                                          String clusterName, String serviceName) {
-        // 모니터링 정보가 준비되지 않았으면 스킵
-        if (blueServiceArn == null || greenServiceArn == null ||
-            clusterName == null || serviceName == null) {
-            log.debug("Monitoring context not ready for deploymentId: {}", deploymentId);
-            return;
-        }
-
-        try {
-            log.info("Invoking CloudWatch monitoring for deploymentId: {}", deploymentId);
-
-            // Lambda 호출
-            MonitorCloudWatchResponse response = monitorCloudWatchService.invokeCloudWatchMonitoring(
-                deploymentId, awsConnection, blueServiceArn, greenServiceArn,
-                clusterName, serviceName);
-
-            if (response.isSuccess()) {
-                // 메트릭을 SSE 이벤트로 발행
-                Map<String, Object> details = monitorCloudWatchService.convertResponseToEventDetails(response);
-                publishStageEvent(deploymentId, 5,
-                    String.format("Blue: %dms, Green: %dms | Error: Blue %.2f%%, Green %.2f%%",
-                        response.getBlueLatencyMs(), response.getGreenLatencyMs(),
-                        response.getBlueErrorRate() * 100, response.getGreenErrorRate() * 100),
-                    details);
-
-                log.info("CloudWatch metrics published - deploymentId: {}, blueLatency: {}ms, greenLatency: {}ms",
-                    deploymentId, response.getBlueLatencyMs(), response.getGreenLatencyMs());
-            } else {
-                log.warn("CloudWatch monitoring failed for deploymentId: {}, message: {}",
-                    deploymentId, response.getMessage());
-            }
-
-        } catch (Exception e) {
-            log.error("Failed to invoke CloudWatch monitoring for deploymentId: {}", deploymentId, e);
-            // 모니터링 실패는 배포를 실패시키지 않으므로 로그만 남김
-        }
-    }
 
     /**
      * Green 서비스 Health Check 및 트래픽 전환 실행 (비동기)
