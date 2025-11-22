@@ -557,29 +557,10 @@ public class StepFunctionsPollingService {
                 return "REGISTER_TASK_COMPLETED";
             }
 
-            // -------------------------
-            // 3) CheckDeployment
-            // -------------------------
-            // ✅ CheckDeployment 파싱은 analyzeExecutionHistoryWithContext에서만 수행
-            // (outputMap이 local variable이라 여기서 저장해도 상위에서 사용 불가)
-            if ("CheckDeployment".equals(taskName)) {
-                return null; // stage 변화 없음 (4 → 내부 로직 유지)
-            }
-
-            // -------------------------
-            // 4) RunMetrics
-            // -------------------------
-            if ("RunMetrics".equals(taskName)) {
-                Map<String, Object> context = new HashMap<>();
-                parseRunMetrics(outputMap, context);
-
-                // 파싱된 메트릭을 outputMap에 저장
-                outputMap.putAll(context);
-
-                // 🔥 RunMetrics 파싱 결과를 monitoringContext에 merge
-                monitoringContext.putAll(context);
-
-                return null; // stage 변화 없음
+            // ✅ RunMetrics, CheckDeployment는 analyzeExecutionHistoryWithContext에서만 처리
+            // 여기서는 절대 처리하지 않음 (중복 파싱 방지)
+            if ("CheckDeployment".equals(taskName) || "RunMetrics".equals(taskName)) {
+                return null; // ← 여기서는 처리하지 않음
             }
 
         } catch (Exception e) {
@@ -1090,6 +1071,8 @@ public class StepFunctionsPollingService {
         long maxEventId = lastProcessedEventId;
         String lastTaskName = "";
         long lastTaskStartedTime = 0;
+        boolean checkDeploymentDetected = false;  // ✅ CheckDeployment 감지 플래그
+        boolean runMetricsDetected = false;       // ✅ RunMetrics 감지 플래그 (둘 다 필요!)
 
         try {
             // ✅ Event를 ID 순서로 정렬 (오래된 것부터 처리하도록)
@@ -1114,12 +1097,53 @@ public class StepFunctionsPollingService {
 
             // ✅ 정렬된 이벤트를 순서대로 탐색
             for (HistoryEvent event : sortedEvents) {
-                // ✅ 마지막 처리한 이벤트 ID보다 작거나 같으면 스킵 (중복 제거)
+                // 🔥🔥 RunMetrics는 ID 필터링 완전 우회 - 가장 먼저 처리
+                var stateExitedDetails = event.stateExitedEventDetails();
+                String taskName = stateExitedDetails != null ? stateExitedDetails.name() : null;
+                String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
+
+                if ("RunMetrics".equals(taskName) && taskOutput != null && !taskOutput.isEmpty()) {
+                    try {
+                        Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+                        Map<String, Object> metricsContext = new HashMap<>();
+                        parseRunMetrics(outputMap, metricsContext);
+                        context.putAll(metricsContext);  // ← monitoringContext에 merge
+                        runMetricsDetected = true;  // 🔥 RunMetrics 감지 플래그
+                        log.info("✅ [RunMetrics-Parsed-Priority] RunMetrics 우선 파싱 성공! blueLatency: {}, greenLatency: {}, blueError: {}, greenError: {}",
+                            metricsContext.get("blueLatencyMs"), metricsContext.get("greenLatencyMs"),
+                            metricsContext.get("blueErrorRate"), metricsContext.get("greenErrorRate"));
+                        maxEventId = Math.max(maxEventId, event.id());  // 🔥 처리 후 ID 업데이트
+                        continue;  // ← 다른 처리 스킵, 다음 event로
+                    } catch (Exception e) {
+                        log.warn("Failed to parse RunMetrics with priority, skipping", e);
+                        continue;
+                    }
+                }
+
+                // 🔥🔥 CheckDeployment 우선 처리 (ID 필터링 완전 우회)
+                if ("CheckDeployment".equals(taskName) && taskOutput != null && !taskOutput.isEmpty()) {
+                    try {
+                        Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+                        Map<String, Object> parseContext = new HashMap<>();
+                        parseCheckDeployment(outputMap, parseContext);
+                        context.putAll(parseContext);  // ← monitoringContext에 merge
+                        checkDeploymentDetected = true;  // 🔥 CheckDeployment 감지 플래그
+                        log.info("✅ [CheckDeployment-Priority] CheckDeployment 우선 파싱 성공! codeDeployDeploymentId: {}",
+                            parseContext.get("codeDeployDeploymentId"));
+                        maxEventId = Math.max(maxEventId, event.id());  // 🔥 처리 후 ID 업데이트
+                        continue;  // ← 다른 처리 스킵, 다음 event로
+                    } catch (Exception e) {
+                        log.warn("Failed to parse CheckDeployment with priority, skipping", e);
+                        continue;
+                    }
+                }
+
+                // ✅ 기타 이벤트는 ID 중복 제거
                 if (event.id() <= lastProcessedEventId) {
                     continue;
                 }
 
-                maxEventId = event.id();  // ✅ 현재 이벤트 ID 업데이트
+                maxEventId = Math.max(maxEventId, event.id());  // ✅ 다른 이벤트는 여기서 ID 업데이트
 
                 String eventType = event.typeAsString();
                 long eventTimestamp = event.timestamp() != null ? event.timestamp().getEpochSecond() : 0;
@@ -1159,9 +1183,9 @@ public class StepFunctionsPollingService {
 
                 // TaskStateEntered 이벤트 (Task 시작)
                 if (event.typeAsString() != null && event.typeAsString().equals("TaskStateEntered")) {
-                    String taskName = extractStateNameFromTaskEvent(event);
+                    String enteredTaskName = extractStateNameFromTaskEvent(event);
                     log.info("📤 [Event-Detail] TaskStateEntered - taskName: {}, eventId: {}, timestamp: {}",
-                        taskName, event.id(), eventTimestamp);
+                        enteredTaskName, event.id(), eventTimestamp);
                     String stage = analyzeTaskStateEntered(deploymentId, event);
                     if (stage != null && !Objects.equals(stage, currentStage)) {
                         currentStage = stage;
@@ -1196,10 +1220,10 @@ public class StepFunctionsPollingService {
                         log.debug("Failed to log TaskStateExited details", e);
                     }
 
-                    // TaskStateExited 처리
-                    var stateExitedDetails = event.stateExitedEventDetails();
-                    String taskName = stateExitedDetails != null ? stateExitedDetails.name() : null;
-                    String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
+                    // TaskStateExited 처리 (변수명 다름 - loop 처음에서 정의된 것과 구분)
+                    var outputDetails = event.stateExitedEventDetails();
+                    String outputTaskName = outputDetails != null ? outputDetails.name() : null;
+                    String outputTaskOutput = outputDetails != null ? outputDetails.output() : null;
 
                     String stage = analyzeTaskStateExited(deploymentId, event, awsConnection, context);
                     if (stage != null) {
@@ -1207,10 +1231,10 @@ public class StepFunctionsPollingService {
                     }
 
                     // TaskStateExited에서 추출된 정보를 context에 저장
-                    if (taskOutput != null && !taskOutput.isEmpty()) {
+                    if (outputTaskOutput != null && !outputTaskOutput.isEmpty()) {
                         try {
                             // 🔥 정답: JSON 최상단 자체가 outputMap
-                            Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+                            Map<String, Object> outputMap = objectMapper.readValue(outputTaskOutput, Map.class);
 
                                 String stageStatus = (String) outputMap.get("stage");
 
@@ -1283,27 +1307,8 @@ public class StepFunctionsPollingService {
                                     }
                                 }
 
-                            // ✅ CheckDeployment Task 감지 (taskName 기반)
-                            if ("CheckDeployment".equals(taskName)) {
-                                log.info("✅ [CheckDeployment-Detected-Polling] CheckDeployment Task 완료! DEPLOYMENT_READY 상태로 변경 - deploymentId: {}", deploymentId);
-                                log.info("📤 [CheckDeployment-Output-Polling] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
-
-                                // ✅ 파싱된 데이터를 context(monitoringContext)로 merge
-                                Map<String, Object> parseContext = new HashMap<>();
-                                parseCheckDeployment(outputMap, parseContext);
-                                context.putAll(parseContext);
-
-                                // ✅ parseCheckDeployment에서 추출된 정보 확인
-                                if (context.containsKey("codeDeployDeploymentId")) {
-                                    log.info("📌 [CheckDeployment-CodeDeploy] codeDeployDeploymentId merged into context: {}", context.get("codeDeployDeploymentId"));
-                                } else {
-                                    log.warn("⚠️ [CheckDeployment-CodeDeploy] codeDeployDeploymentId NOT in context - parsing may have failed");
-                                }
-
-                                // ✅ DEPLOYMENT_READY stage로 업데이트
-                                currentStage = "DEPLOYMENT_READY";
-                                return new PollingResult(currentStage, maxEventId);
-                            }
+                            // ✅ CheckDeployment는 loop 처음에서 우선 처리됨 (여기서는 처리하지 않음)
+                            // (중복 파싱/감지 방지)
                         } catch (Exception e) {
                             log.debug("Failed to extract monitoring context", e);
                         }
@@ -1312,6 +1317,18 @@ public class StepFunctionsPollingService {
             }
         } catch (Exception e) {
             log.error("Error analyzing execution history for deploymentId: {}", deploymentId, e);
+        }
+
+        // 🔥🔥 CheckDeployment + RunMetrics 둘 다 감지되었을 때만 DEPLOYMENT_READY로 변경
+        if (checkDeploymentDetected && runMetricsDetected) {
+            currentStage = "DEPLOYMENT_READY";
+            log.info("✅ [Ready-Both-Confirmed] CheckDeployment + RunMetrics 둘 다 완료! DEPLOYMENT_READY 최종 확정 - deploymentId: {}", deploymentId);
+        } else if (checkDeploymentDetected) {
+            log.info("⏳ [Waiting-RunMetrics] CheckDeployment는 감지되었으나 RunMetrics 대기 중 - deploymentId: {}", deploymentId);
+            // ← RunMetrics가 아직 안 왔으면 stage 변경 안 함 (계속 폴링)
+        } else if (runMetricsDetected) {
+            log.info("⏳ [Waiting-CheckDeployment] RunMetrics는 감지되었으나 CheckDeployment 대기 중 - deploymentId: {}", deploymentId);
+            // ← CheckDeployment가 아직 안 왔으면 stage 변경 안 함 (계속 폴링)
         }
 
         return new PollingResult(currentStage, maxEventId);  // ✅ PollingResult 반환
