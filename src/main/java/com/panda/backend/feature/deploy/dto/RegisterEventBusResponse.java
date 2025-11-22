@@ -42,7 +42,7 @@ public class RegisterEventBusResponse {
      * 성공 여부
      */
     public boolean isSuccess() {
-        return "OK".equalsIgnoreCase(status);
+        return "OK".equalsIgnoreCase(status) || "SUCCESS".equalsIgnoreCase(status);
     }
 
     /**
