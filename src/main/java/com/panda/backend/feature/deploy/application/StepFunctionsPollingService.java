@@ -519,12 +519,11 @@ public class StepFunctionsPollingService {
             log.info("📤 [TaskStateExited-Direct] Task: {}, Got output from AWS SDK directly: {}",
                 taskName, taskOutput.length() > 300 ? taskOutput.substring(0, 300) + "..." : taskOutput);
 
-            // 🔥 정답 경로: root → output → Payload
-            Map<String, Object> root = objectMapper.readValue(taskOutput, Map.class);
-            Map<String, Object> outputMap = (Map<String, Object>) root.get("output");
+            // 🔥 정답: JSON 최상단 자체가 outputMap
+            Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
 
             log.info("📤 [TaskStateExited-FULL-JSON] Task: {}, fullOutput: {}",
-                taskName, objectMapper.writeValueAsString(root));
+                taskName, objectMapper.writeValueAsString(outputMap));
 
             // -------------------------
             // 1) EnsureInfra
@@ -597,7 +596,11 @@ public class StepFunctionsPollingService {
     private void parseCheckDeployment(Map<String, Object> outputMap, Map<String, Object> context) {
 
         try {
-            Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+            // outputMap.checkResult.Payload.checkResult
+            Map<String, Object> checkWrapper = (Map<String, Object>) outputMap.get("checkResult");
+            if (checkWrapper == null) return;
+
+            Map<String, Object> payload = (Map<String, Object>) checkWrapper.get("Payload");
             if (payload == null) return;
 
             Map<String, Object> checkResult = (Map<String, Object>) payload.get("checkResult");
@@ -629,7 +632,11 @@ public class StepFunctionsPollingService {
     private void parseRunMetrics(Map<String, Object> outputMap, Map<String, Object> context) {
 
         try {
-            Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+            // outputMap.metricsResult.Payload.blue/green
+            Map<String, Object> metricsResult = (Map<String, Object>) outputMap.get("metricsResult");
+            if (metricsResult == null) return;
+
+            Map<String, Object> payload = (Map<String, Object>) metricsResult.get("Payload");
             if (payload == null) return;
 
             // BLUE metrics
@@ -1187,10 +1194,8 @@ public class StepFunctionsPollingService {
                             String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
 
                             if (taskOutput != null && !taskOutput.isEmpty()) {
-                                // 🔥 정답 경로: root → output → Payload
-                                Map<String, Object> root = objectMapper.readValue(taskOutput, Map.class);
-                                Map<String, Object> outputMap = (Map<String, Object>) root.get("output");
-                                Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+                                // 🔥 정답: JSON 최상단 자체가 outputMap
+                                Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
 
                                 String stageStatus = (String) outputMap.get("stage");
 
