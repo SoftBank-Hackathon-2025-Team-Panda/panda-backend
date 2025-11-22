@@ -23,21 +23,37 @@ public class StreamDeploymentEventsService {
         // Emitter 등록
         SseEmitter emitter = deploymentEventStore.registerEmitter(deploymentId);
 
-        try {
-            // 연결 확립 신호 전송 (클라이언트가 즉시 SSE 연결 확인 가능)
-            emitter.send(SseEmitter.event()
-                    .id(UUID.randomUUID().toString())
-                    .name("connected")
-                    .reconnectTime(5000)
-                    .data(Map.of("message", "SSE connection established")));
+        // ✅ 1~2초 딜레이 후 connected 이벤트 전송 (비동기)
+        new Thread(() -> {
+            try {
+                Thread.sleep(1500);  // 1.5초 딜레이
 
-            log.info("Connected event sent for deployment: {}", deploymentId);
-        } catch (IOException e) {
-            log.warn("Failed to send connected event for deployment: {}", deploymentId, e);
-        }
+                // 연결 확립 신호 전송 (클라이언트가 즉시 SSE 연결 확인 가능)
+                emitter.send(SseEmitter.event()
+                        .id(UUID.randomUUID().toString())
+                        .name("connected")
+                        .reconnectTime(5000)
+                        .data(Map.of("message", "SSE connection established")));
 
-        // 기존 이벤트 히스토리 전송
-        sendEventHistory(deploymentId, emitter);
+                log.info("Connected event sent for deployment: {} (after 1.5s delay)", deploymentId);
+            } catch (IOException e) {
+                log.warn("Failed to send connected event for deployment: {}", deploymentId, e);
+            } catch (InterruptedException e) {
+                log.warn("Thread interrupted while waiting to send connected event for deployment: {}", deploymentId, e);
+                Thread.currentThread().interrupt();
+            }
+        }).start();
+
+        // 기존 이벤트 히스토리 전송 (connected 이후에 전송되도록)
+        new Thread(() -> {
+            try {
+                Thread.sleep(1500);  // connected와 동시에 전송되도록 같은 딜레이
+                sendEventHistory(deploymentId, emitter);
+            } catch (InterruptedException e) {
+                log.warn("Thread interrupted while waiting to send event history for deployment: {}", deploymentId, e);
+                Thread.currentThread().interrupt();
+            }
+        }).start();
 
         return emitter;
     }
