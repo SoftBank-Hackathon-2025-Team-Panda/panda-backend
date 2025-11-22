@@ -1,11 +1,14 @@
 package com.panda.backend.feature.deploy.infrastructure;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.*;
+
+import java.util.Map;
 
 /**
  * Step Functions의 ExecutionArn을 AWS Secrets Manager에 저장/조회하는 컴포넌트
@@ -21,6 +24,7 @@ import software.amazon.awssdk.services.secretsmanager.model.*;
 public class ExecutionArnStore {
 
     private final SecretsManagerClient secretsManagerClient;
+    private final ObjectMapper objectMapper;
 
     @Value("${aws.secrets-manager.execution-arn-prefix:panda/stepfunctions/}")
     private String secretPrefix;
@@ -71,10 +75,25 @@ public class ExecutionArnStore {
                 .build();
 
             GetSecretValueResponse response = secretsManagerClient.getSecretValue(request);
+            String secretValue = response.secretString();
 
             log.debug("ExecutionArn retrieved from Secrets Manager - secretName: {}", secretName);
 
-            return response.secretString();
+            // JSON 형식인지 확인하고 executionArn 필드 추출
+            if (secretValue != null && secretValue.trim().startsWith("{")) {
+                try {
+                    Map<String, Object> jsonMap = objectMapper.readValue(secretValue, Map.class);
+                    if (jsonMap.containsKey("executionArn")) {
+                        String executionArn = (String) jsonMap.get("executionArn");
+                        log.debug("Extracted executionArn from JSON: {}", executionArn);
+                        return executionArn;
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to parse secret as JSON, returning as-is: {}", e.getMessage());
+                }
+            }
+
+            return secretValue;
 
         } catch (ResourceNotFoundException e) {
             log.debug("ExecutionArn not found in Secrets Manager - owner: {}, repo: {}", owner, repo);
