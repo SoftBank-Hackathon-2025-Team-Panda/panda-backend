@@ -167,6 +167,7 @@ public class StepFunctionsPollingService {
             // Step 2: ExecutionHistory 폴링 (최대 30분)
             while (System.currentTimeMillis() - pollingStartTime < maxPollingDurationMs) {
                 pollCount++;
+                long pollStartTime = System.currentTimeMillis();
 
                 try {
                     // GetExecutionHistory API 호출
@@ -188,8 +189,32 @@ public class StepFunctionsPollingService {
                     String currentStage = pollingResult.currentStage;
                     lastProcessedEventId = pollingResult.lastEventId;  // ✅ 마지막 이벤트 ID 업데이트
 
-                    log.debug("Poll #{} - deploymentId: {}, stage: {}, lastEventId: {}",
-                        pollCount, deploymentId, currentStage, lastProcessedEventId);
+                    // 현재 실행 상태 상세 로깅
+                    long apiCallElapsedMs = System.currentTimeMillis() - pollStartTime;
+                    int totalEventCount = history.events() != null ? history.events().size() : 0;
+                    long lastEventTimestamp = 0;
+                    String lastEventType = "";
+                    if (history.events() != null && !history.events().isEmpty()) {
+                        Object lastEvent = history.events().get(0); // 가장 최신 이벤트
+                        if (lastEvent instanceof HistoryEvent) {
+                            HistoryEvent he = (HistoryEvent) lastEvent;
+                            lastEventTimestamp = he.timestamp() != null ? he.timestamp().getEpochSecond() : 0;
+                            lastEventType = he.typeAsString() != null ? he.typeAsString() : "";
+                        }
+                    }
+
+                    // Step Functions 실행 상태 정보 출력 (30초마다 또는 상태 변화 시)
+                    if (pollCount % 15 == 1 || pollCount == 1) {  // 2초 간격이므로 약 30초마다
+                        long totalElapsedSeconds = (System.currentTimeMillis() - pollingStartTime) / 1000;
+                        long lastEventAgoSeconds = (System.currentTimeMillis() / 1000) - lastEventTimestamp;
+                        log.info("📊 [Polling-Status] Poll #{}, deploymentId: {}, currentStage: {}, " +
+                            "lastEventId: {} (type: {}), totalEvents: {}, totalElapsed: {}s, lastEventAgo: {}s",
+                            pollCount, deploymentId, currentStage, lastProcessedEventId, lastEventType,
+                            totalEventCount, totalElapsedSeconds, lastEventAgoSeconds);
+                    }
+
+                    log.debug("Poll #{} - deploymentId: {}, stage: {}, lastEventId: {}, totalEvents: {}, lastEventType: {}, apiCallElapsed: {}ms",
+                        pollCount, deploymentId, currentStage, lastProcessedEventId, totalEventCount, lastEventType, apiCallElapsedMs);
 
                     // 상태 변화 감지 및 모니터링 정보 저장
                     if (!Objects.equals(currentStage, previousStage)) {
@@ -821,6 +846,8 @@ public class StepFunctionsPollingService {
 
         String currentStage = "RUNNING";
         long maxEventId = lastProcessedEventId;
+        String lastTaskName = "";
+        long lastTaskStartedTime = 0;
 
         try {
             // ✅ Event를 ID 순서로 정렬 (오래된 것부터 처리하도록)
@@ -829,6 +856,19 @@ public class StepFunctionsPollingService {
                 .filter(Objects::nonNull)
                 .sorted(Comparator.comparingLong(HistoryEvent::id))
                 .toList();
+
+            // ✅ 현재 실행 중인 Task 정보 파악 (최신 Task 추적)
+            for (int i = sortedEvents.size() - 1; i >= 0; i--) {
+                HistoryEvent evt = sortedEvents.get(i);
+                if ("TaskStateEntered".equals(evt.typeAsString())) {
+                    String taskName = extractStateNameFromTaskEvent(evt);
+                    if (taskName != null) {
+                        lastTaskName = taskName;
+                        lastTaskStartedTime = evt.timestamp() != null ? evt.timestamp().getEpochSecond() : 0;
+                        break;
+                    }
+                }
+            }
 
             // ✅ 정렬된 이벤트를 순서대로 탐색
             for (HistoryEvent event : sortedEvents) {
@@ -839,7 +879,9 @@ public class StepFunctionsPollingService {
 
                 maxEventId = event.id();  // ✅ 현재 이벤트 ID 업데이트
 
-                log.debug("Processing Event #{}: type={}", event.id(), event.typeAsString());
+                String eventType = event.typeAsString();
+                long eventTimestamp = event.timestamp() != null ? event.timestamp().getEpochSecond() : 0;
+                log.debug("Processing Event #{}: type={}, timestamp={}", event.id(), eventType, eventTimestamp);
 
                 // ExecutionFailed 체크
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionFailed")) {
@@ -857,12 +899,41 @@ public class StepFunctionsPollingService {
                     return new PollingResult("SUCCEEDED", maxEventId);  // ✅ PollingResult 반환
                 }
 
+                // TaskScheduled 이벤트
+                if (event.typeAsString() != null && event.typeAsString().equals("TaskScheduled")) {
+                    log.debug("📤 [Event-Detail] TaskScheduled - eventId: {}, timestamp: {}", event.id(), eventTimestamp);
+                }
+
+                // TaskStarted 이벤트
+                if (event.typeAsString() != null && event.typeAsString().equals("TaskStarted")) {
+                    log.debug("📤 [Event-Detail] TaskStarted - eventId: {}, timestamp: {}", event.id(), eventTimestamp);
+                }
+
+                // TaskSucceeded 이벤트 (Task 완료 - 매우 중요)
+                if (event.typeAsString() != null && event.typeAsString().equals("TaskSucceeded")) {
+                    log.info("📤 [Event-Detail] TaskSucceeded - 이전 Task 완료! eventId: {}, timestamp: {} (마지막 이벤트: {})",
+                        event.id(), eventTimestamp, event.id());
+                }
+
                 // TaskStateEntered 이벤트 (Task 시작)
                 if (event.typeAsString() != null && event.typeAsString().equals("TaskStateEntered")) {
+                    String taskName = extractStateNameFromTaskEvent(event);
+                    log.info("📤 [Event-Detail] TaskStateEntered - taskName: {}, eventId: {}, timestamp: {}",
+                        taskName, event.id(), eventTimestamp);
                     String stage = analyzeTaskStateEntered(deploymentId, event);
                     if (stage != null && !Objects.equals(stage, currentStage)) {
                         currentStage = stage;
                     }
+                }
+
+                // WaitState 이벤트 추적
+                if (event.typeAsString() != null && event.typeAsString().equals("WaitStateEntered")) {
+                    log.info("📤 [Event-Detail] WaitStateEntered - eventId: {}, timestamp: {} (⏳ 체크포인트 또는 대기 상태 - 이 후 자동 진행 예정)",
+                        event.id(), eventTimestamp);
+                }
+                if (event.typeAsString() != null && event.typeAsString().equals("WaitStateExited")) {
+                    log.info("📤 [Event-Detail] WaitStateExited - eventId: {}, timestamp: {} (대기 완료 - 다음 Step으로 진행)",
+                        event.id(), eventTimestamp);
                 }
 
                 // TaskStateExited 이벤트 (Task 완료) - awsConnection 전달
