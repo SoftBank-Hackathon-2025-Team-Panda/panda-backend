@@ -6,6 +6,7 @@ import com.panda.backend.feature.deploy.dto.MonitorCloudWatchResponse;
 import com.panda.backend.feature.deploy.dto.DeploymentResult;
 import com.panda.backend.feature.deploy.event.DeploymentEventPublisher;
 import com.panda.backend.feature.deploy.event.DeploymentEventStore;
+import com.panda.backend.feature.deploy.event.DeploymentEvent;
 import com.panda.backend.feature.deploy.infrastructure.ExecutionArnStore;
 import com.panda.backend.feature.deploy.infrastructure.DeploymentResultStore;
 import lombok.RequiredArgsConstructor;
@@ -257,12 +258,23 @@ public class StepFunctionsPollingService {
                         if (elapsedMs >= AUTO_WAIT_DURATION_MS) {
                             log.info("✅ [AutoDeploy-3min-Complete] 3분 경과! 자동으로 DEPLOYMENT_READY 상태로 저장 - deploymentId: {}", deploymentId);
 
-                            // 배포 준비 완료 상태로 저장 (수동 전환 대기)
+                            // ✅ 1. Success 이벤트 먼저 발행
+                            deploymentEventStore.sendConnectedEvent(deploymentId);
+
+                            // ✅ 2. Success 이벤트 발행
+                            DeploymentEvent successEvent = new DeploymentEvent();
+                            successEvent.setType("success");
+                            successEvent.setMessage("Deployment completed successfully");
+                            deploymentEventStore.broadcastEvent(deploymentId, successEvent);
+
+                            // ✅ 3. 배포 준비 완료 상태로 저장 (수동 전환 대기)
                             saveDeploymentReadyResult(deploymentId, owner, repo, branch,
                                 monitoringContext, pollingStartTime, eventCount, awsConnection);
 
-                            // ✅ SSE 연결 종료 신호: success 이벤트 발행
-                            deploymentEventStore.sendDoneEvent(deploymentId, "✅ 3분 자동 대기 완료! DEPLOYMENT_READY 상태로 저장됨. /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요");
+                            // ✅ 4. DEPLOYMENT_READY 상태 전송 (connected 이벤트 포함)
+                            deploymentEventStore.sendDeploymentReadyEvent(deploymentId,
+                                Map.of("blueUrl", monitoringContext.getOrDefault("blueUrl", ""),
+                                       "greenUrl", monitoringContext.getOrDefault("greenUrl", "")));
                             break;  // ✅ 폴링 종료
                         }
                     }
@@ -291,13 +303,23 @@ public class StepFunctionsPollingService {
                         log.info("✅ [StaleEvent-AutoReady] Stale Event 감지! DEPLOYMENT_READY 상태로 자동 변경하여 /api/v1/deploy/{}/switch 호출 준비 - deploymentId: {}",
                             deploymentId, deploymentId);
 
-                        // ✅ Stale Event 감지 시 DEPLOYMENT_READY 상태로 저장 (수동 전환 준비)
+                        // ✅ 1. Connected 이벤트 먼저 발행
+                        deploymentEventStore.sendConnectedEvent(deploymentId);
+
+                        // ✅ 2. Success 이벤트 발행
+                        DeploymentEvent successEvent = new DeploymentEvent();
+                        successEvent.setType("success");
+                        successEvent.setMessage("Deployment completed successfully");
+                        deploymentEventStore.broadcastEvent(deploymentId, successEvent);
+
+                        // ✅ 3. Stale Event 감지 시 DEPLOYMENT_READY 상태로 저장 (수동 전환 준비)
                         saveDeploymentReadyResult(deploymentId, owner, repo, branch,
                             monitoringContext, pollingStartTime, eventCount, awsConnection);
 
-                        // ✅ SSE 연결 종료 신호
-                        deploymentEventStore.sendDoneEvent(deploymentId,
-                            "⏳ CheckDeployment 진행 중: " + (staleEventTimeoutMs / 1000) + "초 이상 응답이 없어 자동으로 DEPLOYMENT_READY 상태로 변경. /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요");
+                        // ✅ 4. DEPLOYMENT_READY 상태 전송 (connected 이벤트 포함)
+                        deploymentEventStore.sendDeploymentReadyEvent(deploymentId,
+                            Map.of("blueUrl", monitoringContext.getOrDefault("blueUrl", ""),
+                                   "greenUrl", monitoringContext.getOrDefault("greenUrl", "")));
                         break;
                     }
 
@@ -844,7 +866,29 @@ public class StepFunctionsPollingService {
                 details.put("status", outputMap.get("status"));
             }
 
-            // 2. Blue 서비스 메트릭
+            // ✅ 2. CodeDeploy 배포 ID (CheckDeployment/RunMetrics 출력에 포함)
+            if (outputMap.containsKey("deploymentId")) {
+                String depId = (String) outputMap.get("deploymentId");
+                if (depId != null && !depId.isEmpty()) {
+                    details.put("codeDeployDeploymentId", depId);
+                }
+            }
+
+            // ✅ 3. Target Group ARN 저장 (Blue/Green 트래픽 전환 시 필요)
+            if (outputMap.containsKey("targetGroupBlueArn")) {
+                Object blueArn = outputMap.get("targetGroupBlueArn");
+                if (blueArn != null) {
+                    details.put("targetGroupBlueArn", blueArn);
+                }
+            }
+            if (outputMap.containsKey("targetGroupGreenArn")) {
+                Object greenArn = outputMap.get("targetGroupGreenArn");
+                if (greenArn != null) {
+                    details.put("targetGroupGreenArn", greenArn);
+                }
+            }
+
+            // 4. Blue 서비스 메트릭
             if (outputMap.containsKey("blue")) {
                 Object blueObj = outputMap.get("blue");
                 if (blueObj instanceof Map) {
@@ -870,10 +914,15 @@ public class StepFunctionsPollingService {
                     if (blueService.containsKey("url")) {
                         details.put("blueUrl", blueService.get("url"));
                     }
+
+                    // ✅ Blue Target Group ARN (blue 객체 내부에도 있을 수 있음)
+                    if (blueService.containsKey("targetGroupArn")) {
+                        details.put("targetGroupBlueArn", blueService.get("targetGroupArn"));
+                    }
                 }
             }
 
-            // 3. Green 서비스 메트릭
+            // 5. Green 서비스 메트릭
             if (outputMap.containsKey("green")) {
                 Object greenObj = outputMap.get("green");
                 if (greenObj instanceof Map) {
@@ -899,10 +948,15 @@ public class StepFunctionsPollingService {
                     if (greenService.containsKey("url")) {
                         details.put("greenUrl", greenService.get("url"));
                     }
+
+                    // ✅ Green Target Group ARN (green 객체 내부에도 있을 수 있음)
+                    if (greenService.containsKey("targetGroupArn")) {
+                        details.put("targetGroupGreenArn", greenService.get("targetGroupArn"));
+                    }
                 }
             }
 
-            // 4. 성능 비교 정보 (선택사항)
+            // 6. 성능 비교 정보 (선택사항)
             if (outputMap.containsKey("comparison")) {
                 Object comparisonObj = outputMap.get("comparison");
                 if (comparisonObj instanceof Map) {
@@ -1179,6 +1233,15 @@ public class StepFunctionsPollingService {
                                     }
                                     if (healthCheckDetails.containsKey("greenUrl")) {
                                         context.put("greenUrl", healthCheckDetails.get("greenUrl"));
+                                    }
+
+                                    // ✅ CheckDeployment 출력에서 codeDeployDeploymentId 직접 추출 (RegisterTaskAndDeploy가 없었을 경우 대비)
+                                    if (outputMap.containsKey("deploymentId")) {
+                                        String deploymentIdValue = (String) outputMap.get("deploymentId");
+                                        if (deploymentIdValue != null && !deploymentIdValue.isEmpty()) {
+                                            context.put("codeDeployDeploymentId", deploymentIdValue);
+                                            log.info("📌 [CheckDeployment-CodeDeploy] Extracted codeDeployDeploymentId from CheckDeployment output: {}", deploymentIdValue);
+                                        }
                                     }
 
                                     // ✅ DEPLOYMENT_READY stage로 업데이트
