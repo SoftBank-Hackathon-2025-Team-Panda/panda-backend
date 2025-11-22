@@ -42,7 +42,6 @@ public class StepFunctionsPollingService {
     private final DeploymentEventPublisher eventPublisher;
     private final DeploymentEventStore deploymentEventStore;
     private final ObjectMapper objectMapper;
-    private final MonitorCloudWatchService monitorCloudWatchService;
     private final EcsServiceUrlResolverService ecsServiceUrlResolverService;
     private final HealthCheckService healthCheckService;
     private final DeploymentResultStore deploymentResultStore;
@@ -793,51 +792,117 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * CheckDeployment Task의 output에서 HealthCheck 및 트래픽 전환 정보 추출
+     * CheckDeployment Task의 output에서 HealthCheck 및 RunMetrics 정보 추출
+     * Step Functions RunMetrics 응답 구조:
+     * {
+     *   "status": "SUCCESS",
+     *   "config": { "totalRequests": 100, "concurrency": 10 },
+     *   "blue": {
+     *     "url": "http://blue.example.com",
+     *     "latencyMs": 127.56,
+     *     "errorRate": 0,
+     *     "totalRequests": 100,
+     *     "successfulRequests": 100,
+     *     "failedRequests": 0
+     *   },
+     *   "green": {
+     *     "url": "http://green.example.com",
+     *     "latencyMs": 127.06,
+     *     "errorRate": 0,
+     *     "totalRequests": 100,
+     *     "successfulRequests": 100,
+     *     "failedRequests": 0
+     *   },
+     *   "comparison": {
+     *     "fasterService": "green",
+     *     "latencyImprovement": 0.39,
+     *     "errorRateImprovement": null
+     *   }
+     * }
      */
     private Map<String, Object> extractHealthCheckDetails(Map<String, Object> outputMap) {
         Map<String, Object> details = new HashMap<>();
 
-        // output 예시:
-        // {
-        //   "stage": "CHECK_DEPLOYMENT_COMPLETED",
-        //   "healthCheckStatus": "SUCCESS",
-        //   "healthCheckCount": 5,
-        //   "activeService": "green",
-        //   "blueUrl": "http://blue.example.com:8080",
-        //   "greenUrl": "http://green.example.com:8080",
-        //   "blueLatency": 250,
-        //   "greenLatency": 180,
-        //   "blueErrorRate": 0.01,
-        //   "greenErrorRate": 0.005
-        // }
+        try {
+            // 1. 상태 정보
+            if (outputMap.containsKey("status")) {
+                details.put("status", outputMap.get("status"));
+            }
 
-        if (outputMap.containsKey("healthCheckStatus")) {
-            details.put("healthCheckStatus", outputMap.get("healthCheckStatus"));
-        }
-        if (outputMap.containsKey("healthCheckCount")) {
-            details.put("passedChecks", outputMap.get("healthCheckCount"));
-        }
-        if (outputMap.containsKey("activeService")) {
-            details.put("activeService", outputMap.get("activeService"));
-        }
-        if (outputMap.containsKey("blueUrl")) {
-            details.put("blueUrl", outputMap.get("blueUrl"));
-        }
-        if (outputMap.containsKey("greenUrl")) {
-            details.put("greenUrl", outputMap.get("greenUrl"));
-        }
-        if (outputMap.containsKey("blueLatency")) {
-            details.put("blueLatencyMs", outputMap.get("blueLatency"));
-        }
-        if (outputMap.containsKey("greenLatency")) {
-            details.put("greenLatencyMs", outputMap.get("greenLatency"));
-        }
-        if (outputMap.containsKey("blueErrorRate")) {
-            details.put("blueErrorRate", outputMap.get("blueErrorRate"));
-        }
-        if (outputMap.containsKey("greenErrorRate")) {
-            details.put("greenErrorRate", outputMap.get("greenErrorRate"));
+            // 2. Blue 서비스 메트릭
+            if (outputMap.containsKey("blue")) {
+                Object blueObj = outputMap.get("blue");
+                if (blueObj instanceof Map) {
+                    Map<String, Object> blueService = (Map<String, Object>) blueObj;
+
+                    // Blue 응답 시간 (latencyMs -> blueLatencyMs)
+                    if (blueService.containsKey("latencyMs")) {
+                        Object latency = blueService.get("latencyMs");
+                        if (latency instanceof Number) {
+                            details.put("blueLatencyMs", ((Number) latency).longValue());
+                        }
+                    }
+
+                    // Blue 에러율 (errorRate -> blueErrorRate)
+                    if (blueService.containsKey("errorRate")) {
+                        Object errorRate = blueService.get("errorRate");
+                        if (errorRate instanceof Number) {
+                            details.put("blueErrorRate", ((Number) errorRate).doubleValue());
+                        }
+                    }
+
+                    // Blue URL 저장
+                    if (blueService.containsKey("url")) {
+                        details.put("blueUrl", blueService.get("url"));
+                    }
+                }
+            }
+
+            // 3. Green 서비스 메트릭
+            if (outputMap.containsKey("green")) {
+                Object greenObj = outputMap.get("green");
+                if (greenObj instanceof Map) {
+                    Map<String, Object> greenService = (Map<String, Object>) greenObj;
+
+                    // Green 응답 시간 (latencyMs -> greenLatencyMs)
+                    if (greenService.containsKey("latencyMs")) {
+                        Object latency = greenService.get("latencyMs");
+                        if (latency instanceof Number) {
+                            details.put("greenLatencyMs", ((Number) latency).longValue());
+                        }
+                    }
+
+                    // Green 에러율 (errorRate -> greenErrorRate)
+                    if (greenService.containsKey("errorRate")) {
+                        Object errorRate = greenService.get("errorRate");
+                        if (errorRate instanceof Number) {
+                            details.put("greenErrorRate", ((Number) errorRate).doubleValue());
+                        }
+                    }
+
+                    // Green URL 저장
+                    if (greenService.containsKey("url")) {
+                        details.put("greenUrl", greenService.get("url"));
+                    }
+                }
+            }
+
+            // 4. 성능 비교 정보 (선택사항)
+            if (outputMap.containsKey("comparison")) {
+                Object comparisonObj = outputMap.get("comparison");
+                if (comparisonObj instanceof Map) {
+                    Map<String, Object> comparison = (Map<String, Object>) comparisonObj;
+                    if (comparison.containsKey("fasterService")) {
+                        details.put("fasterService", comparison.get("fasterService"));
+                    }
+                    if (comparison.containsKey("latencyImprovement")) {
+                        details.put("latencyImprovement", comparison.get("latencyImprovement"));
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            log.debug("Failed to extract health check details", e);
         }
 
         details.put("stage", 5);
@@ -1072,6 +1137,34 @@ public class StepFunctionsPollingService {
                                     log.info("✅ [CheckDeployment-Detected-Polling] CheckDeployment Task 감지! 3분 자동 대기 후 DEPLOYMENT_READY 상태로 변경 - deploymentId: {}", deploymentId);
                                     log.info("📤 [CheckDeployment-Output-Polling] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
 
+                                    // ✅ CheckDeployment output에서 메트릭 정보 추출
+                                    Map<String, Object> healthCheckDetails = extractHealthCheckDetails(outputMap);
+                                    log.info("📊 [Metrics-Extracted] Extracted metrics: blueLatencyMs={}, greenLatencyMs={}, blueErrorRate={}, greenErrorRate={}",
+                                        healthCheckDetails.get("blueLatencyMs"),
+                                        healthCheckDetails.get("greenLatencyMs"),
+                                        healthCheckDetails.get("blueErrorRate"),
+                                        healthCheckDetails.get("greenErrorRate"));
+
+                                    // ✅ 메트릭을 모니터링 컨텍스트에 저장
+                                    if (healthCheckDetails.containsKey("blueLatencyMs")) {
+                                        context.put("blueLatencyMs", healthCheckDetails.get("blueLatencyMs"));
+                                    }
+                                    if (healthCheckDetails.containsKey("greenLatencyMs")) {
+                                        context.put("greenLatencyMs", healthCheckDetails.get("greenLatencyMs"));
+                                    }
+                                    if (healthCheckDetails.containsKey("blueErrorRate")) {
+                                        context.put("blueErrorRate", healthCheckDetails.get("blueErrorRate"));
+                                    }
+                                    if (healthCheckDetails.containsKey("greenErrorRate")) {
+                                        context.put("greenErrorRate", healthCheckDetails.get("greenErrorRate"));
+                                    }
+                                    if (healthCheckDetails.containsKey("blueUrl")) {
+                                        context.put("blueUrl", healthCheckDetails.get("blueUrl"));
+                                    }
+                                    if (healthCheckDetails.containsKey("greenUrl")) {
+                                        context.put("greenUrl", healthCheckDetails.get("greenUrl"));
+                                    }
+
                                     // ✅ DEPLOYMENT_READY stage로 업데이트
                                     currentStage = "DEPLOYMENT_READY";
                                     return new PollingResult(currentStage, maxEventId);
@@ -1243,7 +1336,7 @@ public class StepFunctionsPollingService {
      * @param owner GitHub owner
      * @param repo GitHub repo
      * @param branch 배포 브랜치
-     * @param monitoringContext 모니터링 컨텍스트 (Blue/Green URL 등)
+     * @param monitoringContext 모니터링 컨텍스트 (Blue/Green URL, 성능 메트릭 등)
      * @param startTimeMs 배포 시작 시간 (밀리초)
      * @param eventCount 발행된 이벤트 개수
      * @param awsConnection AWS 연결 정보
@@ -1285,6 +1378,32 @@ public class StepFunctionsPollingService {
                 result.setGreenServiceArn((String) monitoringContext.get("greenServiceArn"));
             }
 
+            // ✅ 성능 메트릭 저장 (RunMetrics에서 추출된 정보)
+            if (monitoringContext.containsKey("blueLatencyMs")) {
+                Object blueLatency = monitoringContext.get("blueLatencyMs");
+                if (blueLatency instanceof Number) {
+                    result.setBlueLatencyMs(((Number) blueLatency).longValue());
+                }
+            }
+            if (monitoringContext.containsKey("greenLatencyMs")) {
+                Object greenLatency = monitoringContext.get("greenLatencyMs");
+                if (greenLatency instanceof Number) {
+                    result.setGreenLatencyMs(((Number) greenLatency).longValue());
+                }
+            }
+            if (monitoringContext.containsKey("blueErrorRate")) {
+                Object blueErrorRate = monitoringContext.get("blueErrorRate");
+                if (blueErrorRate instanceof Number) {
+                    result.setBlueErrorRate(((Number) blueErrorRate).doubleValue());
+                }
+            }
+            if (monitoringContext.containsKey("greenErrorRate")) {
+                Object greenErrorRate = monitoringContext.get("greenErrorRate");
+                if (greenErrorRate instanceof Number) {
+                    result.setGreenErrorRate(((Number) greenErrorRate).doubleValue());
+                }
+            }
+
             // AWS 연결 정보 저장 (Lambda 호출 시 필요)
             if (awsConnection != null) {
                 result.setAwsAccessKeyId(awsConnection.getAccessKeyId());
@@ -1293,8 +1412,11 @@ public class StepFunctionsPollingService {
             }
 
             deploymentResultStore.save(result);
-            log.info("Deployment ready result saved - deploymentId: {}, status: DEPLOYMENT_READY, duration: {}s",
-                deploymentId, durationSeconds);
+            log.info("Deployment ready result saved - deploymentId: {}, status: DEPLOYMENT_READY, duration: {}s, " +
+                "blueLatencyMs: {}, greenLatencyMs: {}, blueErrorRate: {}, greenErrorRate: {}",
+                deploymentId, durationSeconds,
+                result.getBlueLatencyMs(), result.getGreenLatencyMs(),
+                result.getBlueErrorRate(), result.getGreenErrorRate());
 
         } catch (Exception e) {
             log.error("Failed to save deployment ready result for deploymentId: {}", deploymentId, e);
