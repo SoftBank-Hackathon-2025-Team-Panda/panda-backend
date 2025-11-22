@@ -125,15 +125,15 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
      */
     private String mapStepFunctionsStageToMessage(String stage) {
         return switch (stage) {
-            case "ENSURE_INFRA_IN_PROGRESS" -> "⏳ 인프라 점검 및 생성 진행 중...";
-            case "ENSURE_INFRA_COMPLETED" -> "✅ 인프라 점검 및 생성 완료";
-            case "REGISTER_TASK_IN_PROGRESS" -> "⏳ Task Definition 업데이트 및 배포 시작 중...";
-            case "REGISTER_TASK_COMPLETED" -> "✅ Task Definition 업데이트 완료";
-            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> "⏳ Blue/Green 배포 진행 중...";
-            case "SUCCEEDED" -> "✅ 배포 성공! Green 서버 활성화됨";
-            case "FAILED" -> "❌ 배포 실패";
-            case "RUNNING" -> "⏳ 배포 진행 중...";
-            default -> "⏳ " + stage;
+            case "ENSURE_INFRA_IN_PROGRESS" -> "인프라 점검 및 생성 진행 중...";
+            case "ENSURE_INFRA_COMPLETED" -> "인프라 점검 및 생성 완료";
+            case "REGISTER_TASK_IN_PROGRESS" -> "Task Definition 업데이트 및 배포 시작 중...";
+            case "REGISTER_TASK_COMPLETED" -> "Task Definition 업데이트 완료";
+            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> "Blue/Green 배포 진행 중...";
+            case "SUCCEEDED" -> "배포 성공! Green 서버 활성화됨";
+            case "FAILED" -> "배포 실패";
+            case "RUNNING" -> "배포 진행 중...";
+            default -> stage;
         };
     }
 

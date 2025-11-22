@@ -44,30 +44,7 @@ public class StreamDeploymentEventsService {
             }
         }).start();
 
-        // 기존 이벤트 히스토리 전송 (connected 이후에 전송되도록)
-        new Thread(() -> {
-            try {
-                Thread.sleep(1500);  // connected와 동시에 전송되도록 같은 딜레이
-                sendEventHistory(deploymentId, emitter);
-            } catch (InterruptedException e) {
-                log.warn("Thread interrupted while waiting to send event history for deployment: {}", deploymentId, e);
-                Thread.currentThread().interrupt();
-            }
-        }).start();
-
         return emitter;
-    }
-
-    private void sendEventHistory(String deploymentId, SseEmitter emitter) {
-        List<DeploymentEvent> events = deploymentEventStore.getEventHistory(deploymentId);
-
-        events.forEach(event -> {
-            try {
-                emitter.send(buildSseEvent(event));
-            } catch (Exception e) {
-                log.warn("Failed to send historical event to client for deployment: {}", deploymentId, e);
-            }
-        });
     }
 
     private SseEmitter.SseEventBuilder buildSseEvent(DeploymentEvent event) {
