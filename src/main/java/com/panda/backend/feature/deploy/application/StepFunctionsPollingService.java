@@ -501,42 +501,91 @@ public class StepFunctionsPollingService {
                 return null;
             }
 
-            String taskOutput = stateExitedDetails.output();
-            if (taskOutput == null || taskOutput.isEmpty()) {
-                log.debug("TaskStateExited - No output from stateExitedEventDetails, returning null");
+            // ✅ Task 이름 추출 (TaskStateEntered와 동일한 방식)
+            String taskName = stateExitedDetails.name();
+            if (taskName == null || taskName.isEmpty()) {
+                log.debug("TaskStateExited - No task name found");
                 return null;
             }
 
-            log.info("📤 [TaskStateExited-Direct] Got output from AWS SDK directly: {}",
-                taskOutput.length() > 500 ? taskOutput.substring(0, 500) + "..." : taskOutput);
+            String taskOutput = stateExitedDetails.output();
+            if (taskOutput == null || taskOutput.isEmpty()) {
+                log.debug("TaskStateExited - No output from stateExitedEventDetails for task: {}", taskName);
+                return null;
+            }
+
+            log.info("📤 [TaskStateExited-Direct] Task: {}, Got output from AWS SDK directly: {}",
+                taskName, taskOutput.length() > 300 ? taskOutput.substring(0, 300) + "..." : taskOutput);
 
             Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
-            // ✅ 전체 output JSON 로깅
-            log.info("📤 [TaskStateExited-FULL-JSON] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
+            log.info("📤 [TaskStateExited-FULL-JSON] Task: {}, fullOutput: {}",
+                taskName, objectMapper.writeValueAsString(outputMap));
 
-            String stageStatus = (String) outputMap.get("stage");
+            // ✅ Task 이름으로 판단 (output 구조로 판단 대신)
 
             // Stage 3: EnsureInfra 완료
-            if (stageStatus != null && stageStatus.contains("ENSURE_INFRA")) {
-                log.info("📤 [AWS Step Functions] CheckDeployment output - Stage: {}, Payload: {}", stageStatus, objectMapper.writeValueAsString(outputMap));
+            if ("EnsureInfra".equals(taskName)) {
+                log.info("📤 [AWS Step Functions] EnsureInfra output - Payload: {}", objectMapper.writeValueAsString(outputMap));
                 Map<String, Object> details = extractEnsureInfraDetails(outputMap);
                 publishStageEvent(deploymentId, 3, "ECS 배포 완료", details);
                 return "ENSURE_INFRA_COMPLETED";
             }
 
             // Stage 4: RegisterTaskAndDeploy 완료 (Blue/Green 배포 진행)
-            if (stageStatus != null && stageStatus.contains("REGISTER_TASK")) {
-                log.info("📤 [AWS Step Functions] RegisterTaskAndDeploy output - Stage: {}, Payload: {}", stageStatus, objectMapper.writeValueAsString(outputMap));
+            if ("RegisterTaskAndDeploy".equals(taskName)) {
+                log.info("📤 [AWS Step Functions] RegisterTaskAndDeploy output - Payload: {}", objectMapper.writeValueAsString(outputMap));
                 Map<String, Object> details = extractBlueGreenDetails(deploymentId, outputMap, awsConnection);
                 publishStageEvent(deploymentId, 4, "CodeDeploy Blue/Green 배포 진행 중", details);
                 return "REGISTER_TASK_COMPLETED";
             }
 
-            // ✅ CheckDeployment Task 감지 (3분 자동 대기)
-            if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
-                log.info("✅ [CheckDeployment-Detected] CheckDeployment Task 시작! 3분 자동 대기 후 DEPLOYMENT_READY 상태로 변경됨 - deploymentId: {}", deploymentId);
+            // ✅ CheckDeployment Task 감지
+            if ("CheckDeployment".equals(taskName)) {
+                log.info("✅ [CheckDeployment-Detected] CheckDeployment Task 완료! - deploymentId: {}", deploymentId);
                 log.info("📤 [CheckDeployment-Output] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
-                return "DEPLOYMENT_READY";
+
+                // ✅ checkResult에서 CodeDeploy deploymentId 추출
+                Object checkResultObj = outputMap.get("checkResult");
+                if (checkResultObj instanceof Map) {
+                    Map<String, Object> checkResult = (Map<String, Object>) checkResultObj;
+                    if (checkResult.containsKey("deploymentId")) {
+                        String codeDeployDeploymentId = (String) checkResult.get("deploymentId");
+                        log.info("📍 [CodeDeploy-ID] Extracted CodeDeploy deploymentId: {}", codeDeployDeploymentId);
+                        // outputMap에 저장 (호출자에서 추출 가능)
+                        outputMap.put("codeDeployDeploymentId", codeDeployDeploymentId);
+                    }
+                }
+                // CheckDeployment는 상태 업데이트 없이 진행
+                return null;
+            }
+
+            // ✅ RunMetrics Task 감지 (메트릭 추출!)
+            if ("RunMetrics".equals(taskName)) {
+                log.info("✅ [RunMetrics-Detected] RunMetrics Task 완료! - deploymentId: {}", deploymentId);
+
+                // metricsResult 안에서 실제 메트릭 추출
+                Object metricsResultObj = outputMap.get("metricsResult");
+                if (metricsResultObj instanceof Map) {
+                    Map<String, Object> metricsResult = (Map<String, Object>) metricsResultObj;
+                    Object payloadObj = metricsResult.get("Payload");
+                    if (payloadObj instanceof Map) {
+                        Map<String, Object> payload = (Map<String, Object>) payloadObj;
+                        log.info("📊 [RunMetrics-Extracted] status: {}, blue: {}, green: {}",
+                            payload.get("status"), payload.get("blue"), payload.get("green"));
+
+                        // 메트릭 반환 (호출자에서 context에 저장)
+                        Map<String, Object> metricsDetails = extractHealthCheckDetails(payload);
+                        log.info("📊 [RunMetrics-Metrics] Extracted blueLatencyMs: {}, greenLatencyMs: {}, blueErrorRate: {}, greenErrorRate: {}",
+                            metricsDetails.get("blueLatencyMs"),
+                            metricsDetails.get("greenLatencyMs"),
+                            metricsDetails.get("blueErrorRate"),
+                            metricsDetails.get("greenErrorRate"));
+
+                        // 메트릭을 outputMap에 저장 (호출자에서 쉽게 추출 가능)
+                        outputMap.putAll(metricsDetails);
+                    }
+                }
+                return null;  // RunMetrics는 이 자체로는 stage 변경 없음
             }
 
         } catch (Exception e) {
@@ -1369,6 +1418,11 @@ public class StepFunctionsPollingService {
                 if (greenErrorRate instanceof Number) {
                     result.setGreenErrorRate(((Number) greenErrorRate).doubleValue());
                 }
+            }
+
+            // ✅ CodeDeploy deploymentId 저장 (트래픽 전환 시 필요)
+            if (monitoringContext.containsKey("codeDeployDeploymentId")) {
+                result.setCodeDeployDeploymentId((String) monitoringContext.get("codeDeployDeploymentId"));
             }
 
             // AWS 연결 정보 저장 (Lambda 호출 시 필요)

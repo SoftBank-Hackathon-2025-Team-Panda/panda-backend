@@ -70,14 +70,20 @@ public class DeployController implements DeployApi {
 
             log.info("🚀 [Traffic Switch] Starting traffic switch for deployment: {}", deploymentId);
 
+            // ✅ CodeDeploy deploymentId 확인 (트래픽 전환에 필요)
+            if (result.getCodeDeployDeploymentId() == null) {
+                throw new IllegalArgumentException("CodeDeploy deploymentId가 없습니다. 배포를 다시 확인해주세요.");
+            }
+
             // Lambda 호출: 배포 승인 (트래픽 전환)
+            // ✅ 백엔드의 deploymentId가 아니라 CodeDeploy의 deploymentId를 사용
             ApproveDeploymentRequest lambdaRequest = ApproveDeploymentRequest.builder()
-                .deploymentId(deploymentId)
+                .deploymentId(result.getCodeDeployDeploymentId())  // d-xxx (CodeDeploy ID)
                 .awsAccessKeyId(result.getAwsAccessKeyId())
                 .awsSecretAccessKey(result.getAwsSecretAccessKey())
                 .build();
 
-            log.info("📤 [Lambda Invocation] Invoking lambda_4_appove_deployment with deploymentId: {}", deploymentId);
+            log.info("📤 [Lambda Invocation] Invoking lambda_4_appove_deployment with CodeDeployDeploymentId: {}", result.getCodeDeployDeploymentId());
             ApproveDeploymentResponse lambdaResponse = lambdaInvocationService.invokeApproveDeploymentLambda(lambdaRequest);
 
             // Lambda 응답 검증

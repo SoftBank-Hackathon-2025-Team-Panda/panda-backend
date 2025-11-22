@@ -42,6 +42,9 @@ public class DeploymentResult {
     // 이벤트 정보
     private Integer eventCount;         // 발행된 이벤트 개수
 
+    // CodeDeploy 정보 (트래픽 전환 시 필요)
+    private String codeDeployDeploymentId;  // ✅ CodeDeploy의 deploymentId (d-xxx)
+
     // AWS 연결 정보 (Lambda 호출 시 필요)
     private String awsAccessKeyId;
     private String awsSecretAccessKey;
