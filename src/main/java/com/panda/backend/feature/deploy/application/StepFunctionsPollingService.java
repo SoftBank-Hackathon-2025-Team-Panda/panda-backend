@@ -80,7 +80,7 @@ public class StepFunctionsPollingService {
         String executionArn = null;
         String previousStage = null;
         int pollCount = 0;
-        String secretName = "panda/stepfunctions/" + owner + "-" + repo + "-dockerfile-latest-execution";
+        String secretName = "panda/stepfunctions/" + owner.toLowerCase() + "-" + repo.toLowerCase() + "-latest-execution";
 
         try {
             // Step 1: Secrets Manager에서 ExecutionArn 조회

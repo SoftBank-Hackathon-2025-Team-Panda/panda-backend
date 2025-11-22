@@ -35,7 +35,7 @@ public class ExecutionArnStore {
      */
     public void save(String owner, String repo, String executionArn) {
         try {
-            String secretName = secretPrefix + owner + "-" + repo + "-dockerfile-latest-execution";
+            String secretName = secretPrefix + owner.toLowerCase() + "-" + repo.toLowerCase() + "-latest-execution";
 
             PutSecretValueRequest request = PutSecretValueRequest.builder()
                 .secretId(secretName)
@@ -64,7 +64,7 @@ public class ExecutionArnStore {
      */
     public String get(String owner, String repo) {
         try {
-            String secretName = secretPrefix + owner + "-" + repo + "-dockerfile-latest-execution";
+            String secretName = secretPrefix + owner.toLowerCase() + "-" + repo.toLowerCase() + "-latest-execution";
 
             GetSecretValueRequest request = GetSecretValueRequest.builder()
                 .secretId(secretName)
@@ -95,7 +95,7 @@ public class ExecutionArnStore {
      */
     public void remove(String owner, String repo) {
         try {
-            String secretName = secretPrefix + owner + "-" + repo + "-dockerfile-latest-execution";
+            String secretName = secretPrefix + owner.toLowerCase() + "-" + repo.toLowerCase() + "-latest-execution";
 
             DeleteSecretRequest request = DeleteSecretRequest.builder()
                 .secretId(secretName)
