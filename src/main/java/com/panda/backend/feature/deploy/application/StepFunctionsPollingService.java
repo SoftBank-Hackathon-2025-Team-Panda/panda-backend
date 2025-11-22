@@ -41,7 +41,7 @@ public class StepFunctionsPollingService {
     @Value("${aws.step-functions.max-polling-duration-ms:1800000}")
     private long maxPollingDurationMs;
 
-    @Value("${aws.step-functions.wait-for-execution-arn-ms:3000}")
+    @Value("${aws.step-functions.wait-for-execution-arn-ms:10000}")
     private long waitForExecutionArnMs;
 
     private final ExecutorService executorService = Executors.newFixedThreadPool(10);
