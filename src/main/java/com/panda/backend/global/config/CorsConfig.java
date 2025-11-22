@@ -18,6 +18,8 @@ public class CorsConfig implements WebMvcConfigurer {
         config.addAllowedOrigin("http://localhost:3001");
         config.addAllowedOrigin("http://3.34.216.85");
         config.addAllowedOrigin("https://3.34.216.85");
+        config.addAllowedOrigin("http://3.34.216.85:3000");
+        config.addAllowedOrigin("https://3.34.216.85:3000");
 
         config.addAllowedMethod("GET");
         config.addAllowedMethod("POST");
