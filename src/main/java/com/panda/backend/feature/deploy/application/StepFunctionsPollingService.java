@@ -560,13 +560,9 @@ public class StepFunctionsPollingService {
             // -------------------------
             // 3) CheckDeployment
             // -------------------------
+            // ✅ CheckDeployment 파싱은 analyzeExecutionHistoryWithContext에서만 수행
+            // (outputMap이 local variable이라 여기서 저장해도 상위에서 사용 불가)
             if ("CheckDeployment".equals(taskName)) {
-                Map<String, Object> context = new HashMap<>();
-                parseCheckDeployment(outputMap, context);
-
-                // 파싱된 데이터를 outputMap에 저장 (상위 로직에서 접근 가능)
-                outputMap.putAll(context);
-
                 return null; // stage 변화 없음 (4 → 내부 로직 유지)
             }
 
