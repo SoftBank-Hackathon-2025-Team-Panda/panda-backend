@@ -1289,11 +1289,16 @@ public class StepFunctionsPollingService {
                                 log.info("✅ [CheckDeployment-Detected-Polling] CheckDeployment Task 완료! DEPLOYMENT_READY 상태로 변경 - deploymentId: {}", deploymentId);
                                 log.info("📤 [CheckDeployment-Output-Polling] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
 
+                                // ✅ 파싱된 데이터를 context(monitoringContext)로 merge
+                                Map<String, Object> parseContext = new HashMap<>();
+                                parseCheckDeployment(outputMap, parseContext);
+                                context.putAll(parseContext);
+
                                 // ✅ parseCheckDeployment에서 추출된 정보 확인
                                 if (context.containsKey("codeDeployDeploymentId")) {
-                                    log.info("📌 [CheckDeployment-CodeDeploy] codeDeployDeploymentId already in context: {}", context.get("codeDeployDeploymentId"));
+                                    log.info("📌 [CheckDeployment-CodeDeploy] codeDeployDeploymentId merged into context: {}", context.get("codeDeployDeploymentId"));
                                 } else {
-                                    log.warn("⚠️ [CheckDeployment-CodeDeploy] codeDeployDeploymentId NOT in context - may have failed to parse");
+                                    log.warn("⚠️ [CheckDeployment-CodeDeploy] codeDeployDeploymentId NOT in context - parsing may have failed");
                                 }
 
                                 // ✅ DEPLOYMENT_READY stage로 업데이트
