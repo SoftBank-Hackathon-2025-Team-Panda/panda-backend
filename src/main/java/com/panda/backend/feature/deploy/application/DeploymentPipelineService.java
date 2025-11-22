@@ -36,7 +36,6 @@ public class DeploymentPipelineService {
 
     private final DeploymentEventPublisher eventPublisher;
     private final DeploymentErrorHandler errorHandler;
-    private final EcsDeploymentService ecsDeploymentService;
     private final BlueGreenDeploymentService blueGreenDeploymentService;
     private final HealthCheckService healthCheckService;
     private final StepFunctionsPollingService stepFunctionsPollingService;
@@ -91,7 +90,8 @@ public class DeploymentPipelineService {
 
             // ✅ Step Functions 폴링 시작 (비동기)
             // ExecutionArn은 Step Functions 내부의 Lambda가 Secrets Manager에 저장할 때까지 기다렸다가 조회
-            stepFunctionsPollingService.startPollingAsync(deploymentId, owner, repo);
+            // CloudWatch 모니터링을 위해 AWS 연결 정보도 전달
+            stepFunctionsPollingService.startPollingAsync(deploymentId, owner, repo, awsConnection);
 
             log.info("Step Functions polling started for deploymentId: {}, owner: {}, repo: {}", deploymentId, owner, repo);
 

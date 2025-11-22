@@ -1,8 +1,12 @@
 package com.panda.backend.feature.deploy.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.panda.backend.feature.connect.entity.AwsConnection;
+import com.panda.backend.feature.deploy.dto.MonitorCloudWatchResponse;
+import com.panda.backend.feature.deploy.dto.DeploymentResult;
 import com.panda.backend.feature.deploy.event.DeploymentEventPublisher;
 import com.panda.backend.feature.deploy.infrastructure.ExecutionArnStore;
+import com.panda.backend.feature.deploy.infrastructure.DeploymentResultStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,7 +14,9 @@ import org.springframework.stereotype.Service;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.*;
 
+import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -34,6 +40,10 @@ public class StepFunctionsPollingService {
     private final ExecutionArnStore executionArnStore;
     private final DeploymentEventPublisher eventPublisher;
     private final ObjectMapper objectMapper;
+    private final MonitorCloudWatchService monitorCloudWatchService;
+    private final EcsServiceUrlResolverService ecsServiceUrlResolverService;
+    private final HealthCheckService healthCheckService;
+    private final DeploymentResultStore deploymentResultStore;
 
     @Value("${aws.step-functions.polling-interval-ms:2000}")
     private long pollingIntervalMs;
@@ -44,6 +54,9 @@ public class StepFunctionsPollingService {
     @Value("${aws.step-functions.wait-for-execution-arn-ms:10000}")
     private long waitForExecutionArnMs;
 
+    @Value("${aws.lambda.monitor-interval-seconds:30}")
+    private long monitorIntervalSeconds;
+
     private final ExecutorService executorService = Executors.newFixedThreadPool(10);
 
     /**
@@ -53,11 +66,12 @@ public class StepFunctionsPollingService {
      * @param deploymentId 배포 ID
      * @param owner GitHub owner
      * @param repo GitHub repo
+     * @param awsConnection 사용자 AWS 연결 정보 (CloudWatch 모니터링용)
      */
-    public void startPollingAsync(String deploymentId, String owner, String repo) {
+    public void startPollingAsync(String deploymentId, String owner, String repo, AwsConnection awsConnection) {
         executorService.submit(() -> {
             try {
-                pollExecutionHistory(deploymentId, owner, repo);
+                pollExecutionHistory(deploymentId, owner, repo, awsConnection);
             } catch (Exception e) {
                 log.error("Polling failed for deploymentId: {}", deploymentId, e);
                 eventPublisher.publishErrorEvent(deploymentId,
@@ -74,13 +88,20 @@ public class StepFunctionsPollingService {
      * @param deploymentId 배포 ID
      * @param owner GitHub owner
      * @param repo GitHub repo
+     * @param awsConnection 사용자 AWS 연결 정보
      */
-    private void pollExecutionHistory(String deploymentId, String owner, String repo) {
+    private void pollExecutionHistory(String deploymentId, String owner, String repo, AwsConnection awsConnection) {
         long pollingStartTime = System.currentTimeMillis();
+        long lastMonitoringTime = System.currentTimeMillis();
         String executionArn = null;
         String previousStage = null;
         int pollCount = 0;
+        int eventCount = 0;
         String secretName = "panda/stepfunctions/" + owner.toLowerCase() + "-" + repo.toLowerCase() + "-latest-execution";
+        String branch = "main";  // Default branch
+
+        // CloudWatch 모니터링용 컨텍스트
+        Map<String, Object> monitoringContext = new HashMap<>();
 
         try {
             // Step 1: Secrets Manager에서 ExecutionArn 조회
@@ -125,21 +146,67 @@ public class StepFunctionsPollingService {
                             .build()
                     );
 
-                    // 현재 stage 분석
-                    String currentStage = analyzeExecutionHistory(deploymentId, history.events());
+                    // 현재 stage 분석 (모니터링 컨텍스트 업데이트)
+                    String currentStage = analyzeExecutionHistoryWithContext(deploymentId, history.events(),
+                        monitoringContext, awsConnection);
 
                     log.debug("Poll #{} - deploymentId: {}, stage: {}", pollCount, deploymentId, currentStage);
 
-                    // 상태 변화 감지
+                    // 상태 변화 감지 및 모니터링 정보 저장
                     if (!Objects.equals(currentStage, previousStage)) {
                         log.info("Stage changed: {} → {}", previousStage, currentStage);
                         eventPublisher.publishStepFunctionsProgress(deploymentId, currentStage);
                         previousStage = currentStage;
+                        eventCount++;
+                    }
+
+                    // Stage 5에서는 주기적으로 CloudWatch 모니터링 실행
+                    if ("CHECK_DEPLOYMENT_IN_PROGRESS".equals(currentStage)) {
+                        long currentTime = System.currentTimeMillis();
+                        // 30초 주기로 모니터링 호출
+                        if (currentTime - lastMonitoringTime > monitorIntervalSeconds * 1000) {
+                            String blueServiceArn = (String) monitoringContext.get("blueServiceArn");
+                            String greenServiceArn = (String) monitoringContext.get("greenServiceArn");
+                            String clusterName = (String) monitoringContext.get("clusterName");
+                            String serviceName = (String) monitoringContext.get("serviceName");
+
+                            monitorCloudWatchMetrics(deploymentId, awsConnection,
+                                blueServiceArn, greenServiceArn, clusterName, serviceName);
+                            lastMonitoringTime = currentTime;
+                        }
+                    }
+
+                    // CheckDeployment가 ready 상태이면 배포 완료
+                    if ("CHECK_DEPLOYMENT_COMPLETED".equals(currentStage)) {
+                        log.info("CheckDeployment ready detected for deploymentId: {}, finalizing deployment", deploymentId);
+                        // Step Functions이 아직 SUCCEEDED를 반환하지 않았으면 수동으로 완료 처리
+                        // 최종 결과 저장
+                        saveFinalDeploymentResult(deploymentId, owner, repo, branch, "SUCCEEDED",
+                            monitoringContext, pollingStartTime, eventCount);
+                        break;
                     }
 
                     // 완료/실패 시 폴링 종료
                     if ("SUCCEEDED".equals(currentStage) || "FAILED".equals(currentStage)) {
                         log.info("Polling completed for deploymentId: {}, final stage: {}", deploymentId, currentStage);
+
+                        // 최종 결과 저장
+                        saveFinalDeploymentResult(deploymentId, owner, repo, branch, currentStage,
+                            monitoringContext, pollingStartTime, eventCount);
+                        break;
+                    }
+
+                    // 타임아웃 체크: 최대 폴링 시간 초과
+                    long elapsedMs = System.currentTimeMillis() - pollingStartTime;
+                    if (elapsedMs > maxPollingDurationMs) {
+                        log.error("Step Functions polling exceeded maximum duration for deploymentId: {}", deploymentId);
+                        String errorMsg = String.format("Step Functions polling timeout: exceeded %d minutes",
+                            maxPollingDurationMs / (60 * 1000));
+                        eventPublisher.publishErrorEvent(deploymentId, errorMsg);
+
+                        // 타임아웃 결과 저장
+                        saveTimeoutResult(deploymentId, owner, repo, branch, pollingStartTime, eventCount,
+                            "Step Functions 모니터링 타임아웃");
                         break;
                     }
 
@@ -177,15 +244,13 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * ExecutionHistory Events를 분석하여 현재 Stage 파악
+     * ExecutionHistory Events를 분석하여 현재 Stage 파악 및 SSE 이벤트 발행
      *
      * Step Functions의 State 이름:
-     * - EnsureInfra: 인프라 점검 및 생성
-     * - RegisterTaskAndDeploy: Task Definition 재정의 및 CodeDeploy 시작
-     * - CheckDeployment: 배포 상태 확인
-     * - DeploymentStatusRouter: 상태 분기
-     * - WaitBeforeRecheck: 대기
-     * - DeploymentSucceeded: 성공
+     * - EnsureInfra: 인프라 점검 및 생성 (Stage 3)
+     * - RegisterTaskAndDeploy: Task Definition 재정의 및 CodeDeploy 시작 (Stage 4)
+     * - CheckDeployment: 배포 상태 확인 (Stage 5)
+     * - DeploymentSucceeded: 성공 (Stage 6)
      * - DeploymentFailed: 실패
      *
      * @param deploymentId 배포 ID
@@ -201,45 +266,39 @@ public class StepFunctionsPollingService {
             // 역순으로 탐색 (최신 이벤트부터 확인)
             for (int i = events.size() - 1; i >= 0; i--) {
                 Object eventObj = events.get(i);
-                String eventString = eventObj.toString();
+                HistoryEvent event = castToHistoryEvent(eventObj);
 
-                log.debug("Event #{}: {}", i, eventString.substring(0, Math.min(100, eventString.length())));
+                if (event == null) {
+                    continue;
+                }
+
+                log.debug("Event #{}: type={}", i, event.typeAsString());
 
                 // ExecutionFailed 체크
-                if (eventString.contains("ExecutionFailed")) {
+                if (event.typeAsString() != null && event.typeAsString().equals("ExecutionFailed")) {
                     log.warn("Execution failed for deploymentId: {}", deploymentId);
+                    publishStageEvent(deploymentId, 6, "배포 실패");
                     return "FAILED";
                 }
 
                 // ExecutionSucceeded 체크
-                if (eventString.contains("ExecutionSucceeded")) {
+                if (event.typeAsString() != null && event.typeAsString().equals("ExecutionSucceeded")) {
                     log.info("Execution succeeded for deploymentId: {}", deploymentId);
+                    publishStageEvent(deploymentId, 6, "배포 완료", Map.of("finalService", "green"));
                     return "SUCCEEDED";
                 }
 
                 // TaskStateEntered 이벤트 (Task 시작)
-                if (eventString.contains("TaskStateEntered")) {
-                    String stage = extractStageFromEventString(eventString);
+                if (event.typeAsString() != null && event.typeAsString().equals("TaskStateEntered")) {
+                    String stage = analyzeTaskStateEntered(deploymentId, event);
                     if (stage != null) {
                         return stage;
                     }
                 }
 
                 // TaskStateExited 이벤트 (Task 완료)
-                if (eventString.contains("TaskStateExited")) {
-                    try {
-                        String output = extractTaskOutputFromEventString(eventString);
-                        if (output != null && !output.isEmpty()) {
-                            String stage = extractStageFromTaskOutput(output);
-                            if (stage != null) {
-                                log.debug("Task completed - stage: {}", stage);
-                                return stage;
-                            }
-                        }
-                    } catch (Exception e) {
-                        log.debug("Failed to parse task output", e);
-                    }
-                }
+                // NOTE: TaskStateExited는 analyzeExecutionHistoryWithContext에서 처리됨
+                // 여기서는 스킵
             }
         } catch (Exception e) {
             log.error("Error analyzing execution history for deploymentId: {}", deploymentId, e);
@@ -249,80 +308,770 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * Event 문자열에서 State 이름 추출
-     */
-    private String extractStageFromEventString(String eventString) {
-        if (eventString.contains("EnsureInfra")) {
-            return "ENSURE_INFRA_IN_PROGRESS";
-        } else if (eventString.contains("RegisterTaskAndDeploy")) {
-            return "REGISTER_TASK_IN_PROGRESS";
-        } else if (eventString.contains("CheckDeployment")) {
-            return "CHECK_DEPLOYMENT_IN_PROGRESS";
-        } else if (eventString.contains("DeploymentFailed")) {
-            return "FAILED";
-        } else if (eventString.contains("DeploymentSucceeded")) {
-            return "SUCCEEDED";
-        }
-        return null;
-    }
-
-    /**
-     * Event 문자열에서 Task Output 추출
-     */
-    private String extractTaskOutputFromEventString(String eventString) {
-        // output= 뒤의 내용 추출
-        int outputIdx = eventString.indexOf("output=");
-        if (outputIdx != -1) {
-            int startIdx = outputIdx + 7;
-            int endIdx = eventString.indexOf(",", startIdx);
-            if (endIdx == -1) {
-                endIdx = eventString.indexOf("}", startIdx);
-            }
-            if (endIdx != -1 && endIdx > startIdx) {
-                return eventString.substring(startIdx, endIdx).trim();
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Lambda의 Task Output에서 stage 정보 추출
-     * Output 예시:
-     * {
-     *   "status": "SUCCESS",
-     *   "stage": "ENSURE_INFRA_COMPLETED",
-     *   "event": {...}
-     * }
+     * TaskStateEntered 이벤트 분석
+     * Task가 시작될 때 호출되는 이벤트
      *
-     * @param taskOutput Task의 output JSON 문자열
-     * @return stage 값 또는 null
+     * Step Functions 이벤트 구조:
+     * {
+     *   "timestamp": 1672531200.456,
+     *   "type": "TaskStateEntered",
+     *   "id": 2,
+     *   "previousEventId": 1,
+     *   "stateEnteredEventDetails": {
+     *     "name": "EnsureInfra"
+     *   }
+     * }
      */
-    private String extractStageFromTaskOutput(String taskOutput) {
+    private String analyzeTaskStateEntered(String deploymentId, HistoryEvent event) {
         try {
-            Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+            // Step Functions 이벤트에서 stateEnteredEventDetails.name 추출
+            String taskName = extractStateNameFromTaskEvent(event);
 
-            // stage 필드 확인
-            if (outputMap.containsKey("stage")) {
-                String stage = (String) outputMap.get("stage");
-                if ("ENSURE_INFRA_COMPLETED".equals(stage)) {
-                    return "ENSURE_INFRA_COMPLETED";
-                } else if (stage.contains("COMPLETED") || stage.contains("UPDATED")) {
-                    return stage;
-                }
+            log.debug("TaskStateEntered - taskName: {}", taskName);
+
+            if (taskName == null) {
+                return null;
             }
 
-            // Payload 하위에서 stage 확인
-            if (outputMap.containsKey("Payload")) {
-                Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
-                if (payload != null && payload.containsKey("stage")) {
-                    return (String) payload.get("stage");
-                }
+            // Stage 3: EnsureInfra
+            if ("EnsureInfra".equals(taskName)) {
+                publishStageEvent(deploymentId, 3, "ECS 배포 시작 중",
+                    Map.of("stage", 3));
+                return "ENSURE_INFRA_IN_PROGRESS";
+            }
+
+            // Stage 4: RegisterTaskAndDeploy (CodeDeploy Blue/Green)
+            if ("RegisterTaskAndDeploy".equals(taskName)) {
+                publishStageEvent(deploymentId, 4, "CodeDeploy Blue/Green 배포 시작",
+                    Map.of("stage", 4));
+                return "REGISTER_TASK_IN_PROGRESS";
+            }
+
+            // Stage 5: CheckDeployment (HealthCheck & Traffic Switch)
+            if ("CheckDeployment".equals(taskName)) {
+                publishStageEvent(deploymentId, 5, "Green 서비스 HealthCheck 및 트래픽 전환",
+                    Map.of("stage", 5));
+                return "CHECK_DEPLOYMENT_IN_PROGRESS";
             }
 
         } catch (Exception e) {
-            log.debug("Failed to extract stage from task output", e);
+            log.debug("Failed to analyze TaskStateEntered", e);
         }
 
         return null;
     }
+
+    /**
+     * TaskStateExited 이벤트 분석
+     * Task가 완료될 때 호출되는 이벤트
+     * Task의 output에서 상세 정보를 추출하여 SSE 이벤트를 발행
+     *
+     * @param deploymentId 배포 ID
+     * @param event ExecutionHistory 이벤트
+     * @param awsConnection AWS 연결 정보 (URL 해석용)
+     */
+    private String analyzeTaskStateExited(String deploymentId, HistoryEvent event, AwsConnection awsConnection) {
+        try {
+            String eventString = event.toString();
+            String taskOutput = extractFieldFromEventString(eventString, "output");
+            String taskName = extractFieldFromEventString(eventString, "resource");
+
+            log.debug("TaskStateExited - taskName: {}, output: {}", taskName,
+                taskOutput != null ? taskOutput.substring(0, Math.min(200, taskOutput.length())) : "null");
+
+            if (taskOutput == null || taskOutput.isEmpty()) {
+                return null;
+            }
+
+            Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+            String stageStatus = (String) outputMap.get("stage");
+
+            // Stage 3: EnsureInfra 완료
+            if (stageStatus != null && stageStatus.contains("ENSURE_INFRA")) {
+                Map<String, Object> details = extractEnsureInfraDetails(outputMap);
+                publishStageEvent(deploymentId, 3, "ECS 배포 완료", details);
+                return "ENSURE_INFRA_COMPLETED";
+            }
+
+            // Stage 4: RegisterTaskAndDeploy 완료 (Blue/Green 배포 진행)
+            if (stageStatus != null && stageStatus.contains("REGISTER_TASK")) {
+                Map<String, Object> details = extractBlueGreenDetails(deploymentId, outputMap, awsConnection);
+                publishStageEvent(deploymentId, 4, "CodeDeploy Blue/Green 배포 진행 중", details);
+                return "REGISTER_TASK_COMPLETED";
+            }
+
+            // Stage 5: CheckDeployment 완료 (HealthCheck 성공 및 트래픽 전환)
+            if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
+                Map<String, Object> details = extractHealthCheckDetails(outputMap);
+                publishStageEvent(deploymentId, 5, "트래픽 전환 완료", details);
+                return "CHECK_DEPLOYMENT_COMPLETED";
+            }
+
+        } catch (Exception e) {
+            log.debug("Failed to analyze TaskStateExited", e);
+        }
+
+        return null;
+    }
+
+    /**
+     * TaskStateEntered 이벤트에서 상태명 추출
+     * Step Functions의 stateEnteredEventDetails.name 필드에서 추출
+     *
+     * @param event HistoryEvent
+     * @return 상태명 (EnsureInfra, RegisterTaskAndDeploy, CheckDeployment 등)
+     */
+    private String extractStateNameFromTaskEvent(HistoryEvent event) {
+        try {
+            // HistoryEvent를 JSON으로 변환
+            String eventJson = objectMapper.writeValueAsString(event);
+            Map<String, Object> eventMap = objectMapper.readValue(eventJson, Map.class);
+
+            // stateEnteredEventDetails에서 name 추출
+            if (eventMap.containsKey("stateEnteredEventDetails")) {
+                Object details = eventMap.get("stateEnteredEventDetails");
+                if (details instanceof Map) {
+                    Map<String, Object> detailsMap = (Map<String, Object>) details;
+                    if (detailsMap.containsKey("name")) {
+                        return (String) detailsMap.get("name");
+                    }
+                }
+            }
+
+            // 폴백: 기존 방식으로도 시도 (호환성)
+            String eventString = event.toString();
+            return extractFieldFromEventString(eventString, "resource");
+
+        } catch (Exception e) {
+            log.debug("Failed to extract state name from task event", e);
+        }
+
+        return null;
+    }
+
+    /**
+     * Event 문자열에서 특정 필드값 추출
+     * 예: output="{...}", resource="EnsureInfra"
+     */
+    private String extractFieldFromEventString(String eventString, String fieldName) {
+        try {
+            String pattern = fieldName + "=";
+            int idx = eventString.indexOf(pattern);
+            if (idx == -1) {
+                return null;
+            }
+
+            int startIdx = idx + pattern.length();
+            // " 또는 ' 문자 건너뛰기
+            if (startIdx < eventString.length() && (eventString.charAt(startIdx) == '"' || eventString.charAt(startIdx) == '\'')) {
+                startIdx++;
+            }
+
+            // 종료 문자 찾기
+            int endIdx = eventString.indexOf("\"", startIdx);
+            if (endIdx == -1) {
+                endIdx = eventString.indexOf("'", startIdx);
+            }
+            if (endIdx == -1) {
+                endIdx = eventString.indexOf(",", startIdx);
+            }
+            if (endIdx == -1) {
+                endIdx = eventString.indexOf("}", startIdx);
+            }
+
+            if (endIdx > startIdx) {
+                return eventString.substring(startIdx, endIdx).trim();
+            }
+        } catch (Exception e) {
+            log.debug("Failed to extract field: {}", fieldName, e);
+        }
+
+        return null;
+    }
+
+    /**
+     * EnsureInfra Task의 output에서 세부 정보 추출
+     */
+    private Map<String, Object> extractEnsureInfraDetails(Map<String, Object> outputMap) {
+        Map<String, Object> details = new HashMap<>();
+
+        // output 예시:
+        // {
+        //   "stage": "ENSURE_INFRA_COMPLETED",
+        //   "clusterName": "panda-cluster",
+        //   "serviceName": "panda-service",
+        //   "taskDefinition": "panda-task:1"
+        // }
+
+        if (outputMap.containsKey("clusterName")) {
+            details.put("clusterName", outputMap.get("clusterName"));
+        }
+        if (outputMap.containsKey("serviceName")) {
+            details.put("serviceName", outputMap.get("serviceName"));
+        }
+        if (outputMap.containsKey("taskDefinition")) {
+            details.put("taskDefinition", outputMap.get("taskDefinition"));
+        }
+
+        details.put("stage", 3);
+        return details;
+    }
+
+    /**
+     * RegisterTaskAndDeploy Task의 output에서 Blue/Green 서비스 정보 추출
+     *
+     * @param deploymentId 배포 ID
+     * @param outputMap Step Functions Task output
+     * @param awsConnection AWS 연결 정보 (URL 해석용)
+     * @return 세부 정보 맵
+     */
+    private Map<String, Object> extractBlueGreenDetails(String deploymentId, Map<String, Object> outputMap,
+                                                        AwsConnection awsConnection) {
+        Map<String, Object> details = new HashMap<>();
+
+        // output 예시:
+        // {
+        //   "stage": "REGISTER_TASK_COMPLETED",
+        //   "clusterName": "panda-cluster",
+        //   "serviceName": "panda-service",
+        //   "blueService": {
+        //     "serviceArn": "arn:aws:ecs:ap-northeast-2:123456789012:service/panda-cluster/panda-blue",
+        //     "url": "http://blue.example.com:8080"
+        //   },
+        //   "greenService": {
+        //     "serviceArn": "arn:aws:ecs:ap-northeast-2:123456789012:service/panda-cluster/panda-green",
+        //     "url": "http://green.example.com:8080"
+        //   }
+        // }
+
+        String clusterName = null;
+        String serviceName = null;
+        String blueServiceArn = null;
+        String greenServiceArn = null;
+        String blueUrl = null;
+        String greenUrl = null;
+
+        if (outputMap.containsKey("clusterName")) {
+            clusterName = (String) outputMap.get("clusterName");
+            details.put("clusterName", clusterName);
+        }
+        if (outputMap.containsKey("serviceName")) {
+            serviceName = (String) outputMap.get("serviceName");
+            details.put("serviceName", serviceName);
+        }
+
+        // Blue Service 처리
+        if (outputMap.containsKey("blueService")) {
+            Object blueObj = outputMap.get("blueService");
+            if (blueObj instanceof Map) {
+                Map<String, Object> blueService = (Map<String, Object>) blueObj;
+                if (blueService.containsKey("serviceArn")) {
+                    blueServiceArn = (String) blueService.get("serviceArn");
+                    details.put("blueServiceArn", blueServiceArn);
+                }
+                if (blueService.containsKey("url")) {
+                    blueUrl = (String) blueService.get("url");
+                    details.put("blueUrl", blueUrl);
+                }
+            }
+        }
+
+        // Green Service 처리
+        if (outputMap.containsKey("greenService")) {
+            Object greenObj = outputMap.get("greenService");
+            if (greenObj instanceof Map) {
+                Map<String, Object> greenService = (Map<String, Object>) greenObj;
+                if (greenService.containsKey("serviceArn")) {
+                    greenServiceArn = (String) greenService.get("serviceArn");
+                    details.put("greenServiceArn", greenServiceArn);
+                }
+                if (greenService.containsKey("url")) {
+                    greenUrl = (String) greenService.get("url");
+                    details.put("greenUrl", greenUrl);
+                }
+            }
+        }
+
+        // URL이 없으면 ECS Service 정보로부터 해석
+        if (blueUrl == null && blueServiceArn != null && clusterName != null && awsConnection != null) {
+            try {
+                log.info("Resolving Blue service URL from ARN: {}", blueServiceArn);
+                blueUrl = ecsServiceUrlResolverService.resolveServiceUrl(blueServiceArn, clusterName, awsConnection);
+                if (blueUrl != null) {
+                    details.put("blueUrl", blueUrl);
+                    log.info("Resolved Blue service URL: {}", blueUrl);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to resolve Blue service URL from ARN: {}", blueServiceArn, e);
+            }
+        }
+
+        if (greenUrl == null && greenServiceArn != null && clusterName != null && awsConnection != null) {
+            try {
+                log.info("Resolving Green service URL from ARN: {}", greenServiceArn);
+                greenUrl = ecsServiceUrlResolverService.resolveServiceUrl(greenServiceArn, clusterName, awsConnection);
+                if (greenUrl != null) {
+                    details.put("greenUrl", greenUrl);
+                    log.info("Resolved Green service URL: {}", greenUrl);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to resolve Green service URL from ARN: {}", greenServiceArn, e);
+            }
+        }
+
+        // Blue 서비스 상태 발행
+        if (blueUrl != null) {
+            publishStageEvent(deploymentId, 4, "Blue 서비스 실행 중", Map.of("url", blueUrl));
+        }
+
+        // Green 서비스 상태 발행
+        if (greenUrl != null) {
+            publishStageEvent(deploymentId, 4, "Green 서비스 준비 완료", Map.of("url", greenUrl));
+        }
+
+        details.put("stage", 4);
+        return details;
+    }
+
+    /**
+     * CheckDeployment Task의 output에서 HealthCheck 및 트래픽 전환 정보 추출
+     */
+    private Map<String, Object> extractHealthCheckDetails(Map<String, Object> outputMap) {
+        Map<String, Object> details = new HashMap<>();
+
+        // output 예시:
+        // {
+        //   "stage": "CHECK_DEPLOYMENT_COMPLETED",
+        //   "healthCheckStatus": "SUCCESS",
+        //   "healthCheckCount": 5,
+        //   "activeService": "green",
+        //   "blueUrl": "http://blue.example.com:8080",
+        //   "greenUrl": "http://green.example.com:8080",
+        //   "blueLatency": 250,
+        //   "greenLatency": 180,
+        //   "blueErrorRate": 0.01,
+        //   "greenErrorRate": 0.005
+        // }
+
+        if (outputMap.containsKey("healthCheckStatus")) {
+            details.put("healthCheckStatus", outputMap.get("healthCheckStatus"));
+        }
+        if (outputMap.containsKey("healthCheckCount")) {
+            details.put("passedChecks", outputMap.get("healthCheckCount"));
+        }
+        if (outputMap.containsKey("activeService")) {
+            details.put("activeService", outputMap.get("activeService"));
+        }
+        if (outputMap.containsKey("blueUrl")) {
+            details.put("blueUrl", outputMap.get("blueUrl"));
+        }
+        if (outputMap.containsKey("greenUrl")) {
+            details.put("greenUrl", outputMap.get("greenUrl"));
+        }
+        if (outputMap.containsKey("blueLatency")) {
+            details.put("blueLatencyMs", outputMap.get("blueLatency"));
+        }
+        if (outputMap.containsKey("greenLatency")) {
+            details.put("greenLatencyMs", outputMap.get("greenLatency"));
+        }
+        if (outputMap.containsKey("blueErrorRate")) {
+            details.put("blueErrorRate", outputMap.get("blueErrorRate"));
+        }
+        if (outputMap.containsKey("greenErrorRate")) {
+            details.put("greenErrorRate", outputMap.get("greenErrorRate"));
+        }
+
+        details.put("stage", 5);
+        return details;
+    }
+
+    /**
+     * Object를 HistoryEvent로 캐스팅
+     */
+    private HistoryEvent castToHistoryEvent(Object obj) {
+        try {
+            if (obj instanceof HistoryEvent) {
+                return (HistoryEvent) obj;
+            }
+            // AWS SDK의 HistoryEvent로 변환
+            String jsonString = objectMapper.writeValueAsString(obj);
+            return objectMapper.readValue(jsonString, HistoryEvent.class);
+        } catch (Exception e) {
+            log.debug("Failed to cast to HistoryEvent", e);
+            return null;
+        }
+    }
+
+    /**
+     * SSE 이벤트 발행 헬퍼 메서드
+     */
+    private void publishStageEvent(String deploymentId, Integer stage, String message) {
+        publishStageEvent(deploymentId, stage, message, Map.of("stage", stage));
+    }
+
+    private void publishStageEvent(String deploymentId, Integer stage, String message, Map<String, Object> details) {
+        try {
+            eventPublisher.publishStageEvent(deploymentId, stage,
+                String.format("[Stage %d] %s", stage, message), details);
+        } catch (Exception e) {
+            log.debug("Failed to publish stage event", e);
+        }
+    }
+
+    /**
+     * ExecutionHistory를 분석하면서 모니터링 컨텍스트 업데이트
+     *
+     * @param deploymentId 배포 ID
+     * @param events ExecutionHistory Events
+     * @param context 모니터링 컨텍스트 (blueServiceArn, greenServiceArn 등 저장)
+     * @param awsConnection AWS 연결 정보
+     * @return 현재 Stage
+     */
+    private String analyzeExecutionHistoryWithContext(String deploymentId, List<?> events,
+                                                       Map<String, Object> context,
+                                                       AwsConnection awsConnection) {
+        if (events == null || events.isEmpty()) {
+            return "RUNNING";
+        }
+
+        String currentStage = "RUNNING";
+
+        try {
+            // 역순으로 탐색 (최신 이벤트부터 확인)
+            for (int i = events.size() - 1; i >= 0; i--) {
+                Object eventObj = events.get(i);
+                HistoryEvent event = castToHistoryEvent(eventObj);
+
+                if (event == null) {
+                    continue;
+                }
+
+                log.debug("Event #{}: type={}", i, event.typeAsString());
+
+                // ExecutionFailed 체크
+                if (event.typeAsString() != null && event.typeAsString().equals("ExecutionFailed")) {
+                    log.warn("Execution failed for deploymentId: {}", deploymentId);
+                    publishStageEvent(deploymentId, 6, "배포 실패");
+                    return "FAILED";
+                }
+
+                // ExecutionSucceeded 체크
+                if (event.typeAsString() != null && event.typeAsString().equals("ExecutionSucceeded")) {
+                    log.info("Execution succeeded for deploymentId: {}", deploymentId);
+                    publishStageEvent(deploymentId, 6, "배포 완료", Map.of("finalService", "green"));
+                    return "SUCCEEDED";
+                }
+
+                // TaskStateEntered 이벤트 (Task 시작)
+                if (event.typeAsString() != null && event.typeAsString().equals("TaskStateEntered")) {
+                    String stage = analyzeTaskStateEntered(deploymentId, event);
+                    if (stage != null && !Objects.equals(stage, currentStage)) {
+                        currentStage = stage;
+                    }
+                }
+
+                // TaskStateExited 이벤트 (Task 완료) - awsConnection 전달
+                if (event.typeAsString() != null && event.typeAsString().equals("TaskStateExited")) {
+                    String stage = analyzeTaskStateExited(deploymentId, event, awsConnection);
+                    if (stage != null) {
+                        currentStage = stage;
+
+                        // TaskStateExited에서 추출된 정보를 context에 저장
+                        try {
+                            String eventString = event.toString();
+                            String taskOutput = extractFieldFromEventString(eventString, "output");
+
+                            if (taskOutput != null && !taskOutput.isEmpty()) {
+                                Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+                                String stageStatus = (String) outputMap.get("stage");
+
+                                // Stage 4 완료 - Blue/Green 서비스 정보 저장
+                                if (stageStatus != null && stageStatus.contains("REGISTER_TASK")) {
+                                    String greenUrl = null;
+                                    if (outputMap.containsKey("blueService")) {
+                                        Object blueObj = outputMap.get("blueService");
+                                        if (blueObj instanceof Map) {
+                                            Map<String, Object> blueService = (Map<String, Object>) blueObj;
+                                            context.put("blueServiceArn", blueService.get("serviceArn"));
+                                        }
+                                    }
+                                    if (outputMap.containsKey("greenService")) {
+                                        Object greenObj = outputMap.get("greenService");
+                                        if (greenObj instanceof Map) {
+                                            Map<String, Object> greenService = (Map<String, Object>) greenObj;
+                                            context.put("greenServiceArn", greenService.get("serviceArn"));
+                                            if (greenService.containsKey("url")) {
+                                                greenUrl = (String) greenService.get("url");
+                                                context.put("greenUrl", greenUrl);
+                                            }
+                                        }
+                                    }
+                                    if (outputMap.containsKey("clusterName")) {
+                                        context.put("clusterName", outputMap.get("clusterName"));
+                                    }
+                                    if (outputMap.containsKey("serviceName")) {
+                                        context.put("serviceName", outputMap.get("serviceName"));
+                                    }
+                                    // CodeDeploy 정보 저장
+                                    if (outputMap.containsKey("codeDeployDeploymentId")) {
+                                        context.put("codeDeployDeploymentId", outputMap.get("codeDeployDeploymentId"));
+                                    }
+                                    if (outputMap.containsKey("codeDeployApplicationName")) {
+                                        context.put("codeDeployApplicationName", outputMap.get("codeDeployApplicationName"));
+                                    }
+
+                                    // Health Check 실행 (Green URL이 있는 경우)
+                                    if (greenUrl != null && !greenUrl.isEmpty()) {
+                                        try {
+                                            String codeDeployDeploymentId = (String) context.get("codeDeployDeploymentId");
+                                            String codeDeployApplicationName = (String) context.get("codeDeployApplicationName");
+                                            triggerHealthCheck(deploymentId, greenUrl, codeDeployDeploymentId,
+                                                codeDeployApplicationName, awsConnection);
+                                        } catch (Exception e) {
+                                            log.warn("Failed to trigger health check for deploymentId: {}", deploymentId, e);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            log.debug("Failed to extract monitoring context", e);
+                        }
+
+                        if (currentStage != null) {
+                            return currentStage;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error analyzing execution history for deploymentId: {}", deploymentId, e);
+        }
+
+        return currentStage;
+    }
+
+    /**
+     * CloudWatch 메트릭 모니터링 실행
+     */
+    private void monitorCloudWatchMetrics(String deploymentId, AwsConnection awsConnection,
+                                          String blueServiceArn, String greenServiceArn,
+                                          String clusterName, String serviceName) {
+        // 모니터링 정보가 준비되지 않았으면 스킵
+        if (blueServiceArn == null || greenServiceArn == null ||
+            clusterName == null || serviceName == null) {
+            log.debug("Monitoring context not ready for deploymentId: {}", deploymentId);
+            return;
+        }
+
+        try {
+            log.info("Invoking CloudWatch monitoring for deploymentId: {}", deploymentId);
+
+            // Lambda 호출
+            MonitorCloudWatchResponse response = monitorCloudWatchService.invokeCloudWatchMonitoring(
+                deploymentId, awsConnection, blueServiceArn, greenServiceArn,
+                clusterName, serviceName);
+
+            if (response.isSuccess()) {
+                // 메트릭을 SSE 이벤트로 발행
+                Map<String, Object> details = monitorCloudWatchService.convertResponseToEventDetails(response);
+                publishStageEvent(deploymentId, 5,
+                    String.format("Blue: %dms, Green: %dms | Error: Blue %.2f%%, Green %.2f%%",
+                        response.getBlueLatencyMs(), response.getGreenLatencyMs(),
+                        response.getBlueErrorRate() * 100, response.getGreenErrorRate() * 100),
+                    details);
+
+                log.info("CloudWatch metrics published - deploymentId: {}, blueLatency: {}ms, greenLatency: {}ms",
+                    deploymentId, response.getBlueLatencyMs(), response.getGreenLatencyMs());
+            } else {
+                log.warn("CloudWatch monitoring failed for deploymentId: {}, message: {}",
+                    deploymentId, response.getMessage());
+            }
+
+        } catch (Exception e) {
+            log.error("Failed to invoke CloudWatch monitoring for deploymentId: {}", deploymentId, e);
+            // 모니터링 실패는 배포를 실패시키지 않으므로 로그만 남김
+        }
+    }
+
+    /**
+     * Green 서비스 Health Check 및 트래픽 전환 실행 (비동기)
+     *
+     * @param deploymentId 배포 ID
+     * @param greenUrl Green 서비스 URL
+     * @param codeDeployDeploymentId CodeDeploy 배포 ID
+     * @param codeDeployApplicationName CodeDeploy 애플리케이션명
+     * @param awsConnection AWS 연결 정보
+     */
+    private void triggerHealthCheck(String deploymentId, String greenUrl,
+                                    String codeDeployDeploymentId, String codeDeployApplicationName,
+                                    AwsConnection awsConnection) {
+        executorService.submit(() -> {
+            try {
+                log.info("Triggering health check for deploymentId: {}, greenUrl: {}", deploymentId, greenUrl);
+
+                // StageEventHelper 생성
+                com.panda.backend.feature.deploy.event.StageEventHelper stageHelper =
+                    new com.panda.backend.feature.deploy.event.StageEventHelper(deploymentId, eventPublisher);
+
+                // Health Check 실행
+                healthCheckService.performHealthCheckAndTrafficSwitch(
+                    deploymentId,
+                    stageHelper,
+                    greenUrl,
+                    codeDeployDeploymentId,
+                    codeDeployApplicationName,
+                    awsConnection
+                );
+
+                log.info("Health check completed successfully for deploymentId: {}", deploymentId);
+
+            } catch (Exception e) {
+                log.error("Health check failed for deploymentId: {}", deploymentId, e);
+                try {
+                    eventPublisher.publishErrorEvent(deploymentId,
+                        "Health Check 실패: " + e.getMessage());
+                } catch (Exception publishEx) {
+                    log.warn("Failed to publish error event for health check failure", publishEx);
+                }
+            }
+        });
+    }
+
+    /**
+     * 최종 배포 결과 저장
+     *
+     * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
+     * @param branch 배포 브랜치
+     * @param finalStage 최종 상태 (SUCCEEDED 또는 FAILED)
+     * @param monitoringContext 모니터링 컨텍스트
+     * @param startTimeMs 배포 시작 시간 (밀리초)
+     * @param eventCount 발행된 이벤트 개수
+     */
+    private void saveFinalDeploymentResult(String deploymentId, String owner, String repo, String branch,
+                                           String finalStage, Map<String, Object> monitoringContext,
+                                           long startTimeMs, int eventCount) {
+        try {
+            LocalDateTime startedAt = LocalDateTime.now().minusNanos((System.currentTimeMillis() - startTimeMs) * 1_000_000);
+            LocalDateTime completedAt = LocalDateTime.now();
+            long durationSeconds = (System.currentTimeMillis() - startTimeMs) / 1000;
+
+            // 기본 정보
+            DeploymentResult result = DeploymentResult.builder()
+                .deploymentId(deploymentId)
+                .status("SUCCEEDED".equals(finalStage) ? "COMPLETED" : "FAILED")
+                .owner(owner)
+                .repo(repo)
+                .branch(branch)
+                .startedAt(startedAt)
+                .completedAt(completedAt)
+                .durationSeconds(durationSeconds)
+                .eventCount(eventCount)
+                .build();
+
+            // 성공 시 추가 정보 채우기
+            if ("SUCCEEDED".equals(finalStage)) {
+                result.setFinalService("green");
+
+                // 모니터링 컨텍스트에서 URL 추출
+                if (monitoringContext.containsKey("blueUrl")) {
+                    result.setBlueUrl((String) monitoringContext.get("blueUrl"));
+                }
+                if (monitoringContext.containsKey("greenUrl")) {
+                    result.setGreenUrl((String) monitoringContext.get("greenUrl"));
+                }
+
+                // 성능 메트릭 추출 (있는 경우)
+                if (monitoringContext.containsKey("blueLatencyMs")) {
+                    Object blueLatency = monitoringContext.get("blueLatencyMs");
+                    if (blueLatency instanceof Number) {
+                        result.setBlueLatencyMs(((Number) blueLatency).longValue());
+                    }
+                }
+                if (monitoringContext.containsKey("greenLatencyMs")) {
+                    Object greenLatency = monitoringContext.get("greenLatencyMs");
+                    if (greenLatency instanceof Number) {
+                        result.setGreenLatencyMs(((Number) greenLatency).longValue());
+                    }
+                }
+                if (monitoringContext.containsKey("blueErrorRate")) {
+                    Object blueError = monitoringContext.get("blueErrorRate");
+                    if (blueError instanceof Number) {
+                        result.setBlueErrorRate(((Number) blueError).doubleValue());
+                    }
+                }
+                if (monitoringContext.containsKey("greenErrorRate")) {
+                    Object greenError = monitoringContext.get("greenErrorRate");
+                    if (greenError instanceof Number) {
+                        result.setGreenErrorRate(((Number) greenError).doubleValue());
+                    }
+                }
+            } else {
+                // 실패 시 에러 메시지 설정
+                if (monitoringContext.containsKey("errorMessage")) {
+                    result.setErrorMessage((String) monitoringContext.get("errorMessage"));
+                } else {
+                    result.setErrorMessage("배포 실패: 알 수 없는 오류");
+                }
+
+                // 실패해도 URL은 저장할 수 있음
+                if (monitoringContext.containsKey("blueUrl")) {
+                    result.setBlueUrl((String) monitoringContext.get("blueUrl"));
+                }
+                if (monitoringContext.containsKey("greenUrl")) {
+                    result.setGreenUrl((String) monitoringContext.get("greenUrl"));
+                }
+            }
+
+            // 결과 저장
+            deploymentResultStore.save(result);
+            log.info("Deployment result saved - deploymentId: {}, status: {}, duration: {}s",
+                deploymentId, result.getStatus(), durationSeconds);
+
+        } catch (Exception e) {
+            log.error("Failed to save deployment result for deploymentId: {}", deploymentId, e);
+        }
+    }
+
+    /**
+     * 타임아웃 결과 저장
+     *
+     * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
+     * @param branch 배포 브랜치
+     * @param startTimeMs 배포 시작 시간 (밀리초)
+     * @param eventCount 발행된 이벤트 개수
+     * @param errorMessage 타임아웃 에러 메시지
+     */
+    private void saveTimeoutResult(String deploymentId, String owner, String repo, String branch,
+                                   long startTimeMs, int eventCount, String errorMessage) {
+        try {
+            LocalDateTime startedAt = LocalDateTime.now().minusNanos((System.currentTimeMillis() - startTimeMs) * 1_000_000);
+            LocalDateTime completedAt = LocalDateTime.now();
+            long durationSeconds = (System.currentTimeMillis() - startTimeMs) / 1000;
+
+            DeploymentResult result = DeploymentResult.builder()
+                .deploymentId(deploymentId)
+                .status("FAILED")
+                .owner(owner)
+                .repo(repo)
+                .branch(branch)
+                .startedAt(startedAt)
+                .completedAt(completedAt)
+                .durationSeconds(durationSeconds)
+                .errorMessage(errorMessage)
+                .eventCount(eventCount)
+                .build();
+
+            deploymentResultStore.save(result);
+            log.info("Timeout result saved - deploymentId: {}, duration: {}s, message: {}",
+                deploymentId, durationSeconds, errorMessage);
+
+        } catch (Exception e) {
+            log.error("Failed to save timeout result for deploymentId: {}", deploymentId, e);
+        }
+    }
+
 }

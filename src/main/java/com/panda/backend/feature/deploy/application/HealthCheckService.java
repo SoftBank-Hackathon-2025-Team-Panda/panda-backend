@@ -3,6 +3,7 @@ package com.panda.backend.feature.deploy.application;
 import com.panda.backend.feature.connect.entity.AwsConnection;
 import com.panda.backend.feature.deploy.event.StageEventHelper;
 import com.panda.backend.feature.deploy.exception.HealthCheckException;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -22,17 +23,22 @@ import java.util.Map;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class HealthCheckService {
+
+    private final CodeDeployTrafficSwitchService codeDeployTrafficSwitchService;
 
     /**
      * Stage 5: HealthCheck & Traffic Switching
-     * - Green 서비스에 5번 HTTP 요청
+     * - Green 서비스에 5번 HTTP 요청 (2초 간격)
+     * - 각 체크마다 최대 3번 재시도
      * - 레이턴시 측정
      * - 결과 평가
-     * - ALB 트래픽 전환
+     * - CodeDeploy 트래픽 전환 승인
      */
     public void performHealthCheckAndTrafficSwitch(String deploymentId, StageEventHelper stageHelper,
-                                                   String greenUrl, AwsConnection awsConnection) throws Exception {
+                                                   String greenUrl, String codeDeployDeploymentId,
+                                                   String codeDeployApplicationName, AwsConnection awsConnection) throws Exception {
         HttpClient httpClient = HttpClient.newHttpClient();
         ElasticLoadBalancingV2Client elbClient = createElbClient(awsConnection);
 
@@ -40,45 +46,70 @@ public class HealthCheckService {
             stageHelper.stage5HealthCheckRunning(greenUrl);
             log.info("Starting health check for green service at {}", greenUrl);
 
-            // 1. 5번의 Health Check 실행
+            // 1. 5번의 Health Check 실행 (2초 간격)
             int passedChecks = 0;
             int failedChecks = 0;
             long totalLatency = 0;
 
-            String healthUrl = greenUrl + "/health";
-
             for (int i = 1; i <= 5; i++) {
-                try {
-                    HttpRequest request = HttpRequest.newBuilder()
-                            .uri(new URI(healthUrl))
-                            .GET()
-                            .timeout(Duration.ofSeconds(10))
-                            .build();
+                boolean checkPassed = false;
+                long latency = 0;
+                String lastError = null;
 
-                    long startTime = System.currentTimeMillis();
-                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-                    long latency = System.currentTimeMillis() - startTime;
-                    totalLatency += latency;
+                // 최대 3번 재시도
+                for (int retry = 1; retry <= 3; retry++) {
+                    try {
+                        // 먼저 /health 엔드포인트 시도, 실패 시 / 시도
+                        String endpoint = tryHealthEndpoint(httpClient, greenUrl);
+                        if (endpoint != null) {
+                            HttpRequest request = HttpRequest.newBuilder()
+                                    .uri(new URI(endpoint))
+                                    .GET()
+                                    .timeout(Duration.ofSeconds(5))  // 5초 타임아웃
+                                    .build();
 
-                    if (response.statusCode() == 200) {
-                        passedChecks++;
-                        log.info("Health check {} passed - Status: {}, Latency: {}ms", i, response.statusCode(), latency);
-                    } else {
-                        failedChecks++;
-                        log.warn("Health check {} failed - Status: {}", i, response.statusCode());
+                            long startTime = System.currentTimeMillis();
+                            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                            latency = System.currentTimeMillis() - startTime;
+                            totalLatency += latency;
+
+                            if (response.statusCode() == 200) {
+                                passedChecks++;
+                                checkPassed = true;
+                                log.info("Health check {}/{} passed - Retry: {}, Status: {}, Latency: {}ms",
+                                        i, 5, retry, response.statusCode(), latency);
+                                break;
+                            } else {
+                                lastError = "Status: " + response.statusCode();
+                                log.warn("Health check {}/{} - Retry: {} - Status: {}", i, 5, retry, response.statusCode());
+                            }
+                        } else {
+                            lastError = "No healthy endpoint available";
+                        }
+
+                    } catch (Exception e) {
+                        lastError = e.getMessage();
+                        log.warn("Health check {}/{} - Retry: {} - Exception: {}", i, 5, retry, e.getMessage());
                     }
 
-                    stageHelper.stage5HealthCheckRunning(String.format("%s - Check %d/5 (Status: %d, Latency: %dms)",
-                            greenUrl, i, response.statusCode(), latency));
-
-                } catch (Exception e) {
-                    failedChecks++;
-                    log.warn("Health check {} exception: {}", i, e.getMessage());
-                    stageHelper.stage5HealthCheckRunning(String.format("%s - Check %d/5 (Failed: %s)",
-                            greenUrl, i, e.getMessage()));
+                    // 마지막 재시도가 아니면 100ms 대기 후 재시도
+                    if (retry < 3) {
+                        Thread.sleep(100);
+                    }
                 }
 
-                Thread.sleep(1000);  // 1초 대기 후 다음 체크
+                if (!checkPassed) {
+                    failedChecks++;
+                    log.warn("Health check {}/5 failed after 3 retries: {}", i, lastError);
+                }
+
+                stageHelper.stage5HealthCheckRunning(String.format("%s - Check %d/5 (%s)",
+                        greenUrl, i, checkPassed ? "Passed" : "Failed"));
+
+                // 2초 간격으로 다음 체크 실행 (마지막 체크는 대기 안함)
+                if (i < 5) {
+                    Thread.sleep(2000);
+                }
             }
 
             // 2. 결과 평가
@@ -96,15 +127,20 @@ public class HealthCheckService {
             log.info("Health check passed - Passed: {}, Failed: {}, Average Latency: {}ms, Error Rate: {}%",
                     passedChecks, failedChecks, (long) averageLatency, String.format("%.1f", errorRate));
 
-            // 3. Traffic Switch (ALB Target Group 업데이트)
+            // 3. CodeDeploy 트래픽 전환 승인
             stageHelper.stage5TrafficSwitching("blue", "green");
-            log.info("Traffic switching from blue to green");
+            log.info("Approving traffic switch from blue to green via CodeDeploy");
 
-            // ALB에서 Blue를 제거하고 Green을 추가
             try {
-                switchTrafficToGreen(elbClient);
+                codeDeployTrafficSwitchService.approveTrafficSwitch(
+                        deploymentId,
+                        codeDeployDeploymentId,
+                        codeDeployApplicationName,
+                        awsConnection
+                );
+                log.info("Traffic switch approved via CodeDeploy for deploymentId: {}", deploymentId);
             } catch (Exception e) {
-                log.warn("Traffic switch failed: {}, continuing anyway", e.getMessage());
+                log.warn("CodeDeploy traffic switch approval failed: {}, continuing anyway", e.getMessage());
             }
 
             Thread.sleep(1000);
@@ -123,6 +159,46 @@ public class HealthCheckService {
         } finally {
             elbClient.close();
         }
+    }
+
+    /**
+     * /health 또는 / 엔드포인트 시도
+     * @return 성공한 엔드포인트 또는 null
+     */
+    private String tryHealthEndpoint(HttpClient httpClient, String baseUrl) {
+        // /health 엔드포인트 시도
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(new URI(baseUrl + "/health"))
+                    .GET()
+                    .timeout(Duration.ofSeconds(2))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return baseUrl + "/health";
+            }
+        } catch (Exception e) {
+            log.debug("Health endpoint not available: {}", e.getMessage());
+        }
+
+        // / 엔드포인트 시도
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(new URI(baseUrl + "/"))
+                    .GET()
+                    .timeout(Duration.ofSeconds(2))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return baseUrl + "/";
+            }
+        } catch (Exception e) {
+            log.debug("Root endpoint not available: {}", e.getMessage());
+        }
+
+        return null;
     }
 
     /**
