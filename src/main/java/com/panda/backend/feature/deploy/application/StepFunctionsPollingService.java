@@ -888,7 +888,7 @@ public class StepFunctionsPollingService {
                                     }
                                 }
 
-                                // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 저장
+                                // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지 및 stage 반환
                                 if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
                                     Object statusObj = outputMap.get("status");
                                     if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
@@ -914,6 +914,10 @@ public class StepFunctionsPollingService {
                                         if (outputMap.containsKey("greenUrl")) {
                                             context.put("greenUrl", outputMap.get("greenUrl"));
                                         }
+
+                                        // ✅ DEPLOYMENT_READY stage로 업데이트하여 polling 종료
+                                        currentStage = "DEPLOYMENT_READY";
+                                        return new PollingResult(currentStage, maxEventId);
                                     }
                                 }
                             }

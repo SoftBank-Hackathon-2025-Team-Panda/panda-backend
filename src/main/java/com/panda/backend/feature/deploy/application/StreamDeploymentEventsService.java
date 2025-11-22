@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -21,6 +22,19 @@ public class StreamDeploymentEventsService {
     public SseEmitter stream(String deploymentId) {
         // Emitter 등록
         SseEmitter emitter = deploymentEventStore.registerEmitter(deploymentId);
+
+        try {
+            // 연결 확립 신호 전송 (클라이언트가 즉시 SSE 연결 확인 가능)
+            emitter.send(SseEmitter.event()
+                    .id(UUID.randomUUID().toString())
+                    .name("connected")
+                    .reconnectTime(5000)
+                    .data(Map.of("message", "SSE connection established")));
+
+            log.info("Connected event sent for deployment: {}", deploymentId);
+        } catch (IOException e) {
+            log.warn("Failed to send connected event for deployment: {}", deploymentId, e);
+        }
 
         // 기존 이벤트 히스토리 전송
         sendEventHistory(deploymentId, emitter);

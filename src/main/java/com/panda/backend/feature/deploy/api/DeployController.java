@@ -87,22 +87,4 @@ public class DeployController implements DeployApi {
         return ApiResponse.success("배포 결과 조회 성공", result);
     }
 
-    // TODO: 성능 비교 API 구현
-    // @GetMapping("/api/v1/deploy/{deploymentId}/performance")
-    // public ApiResponse<PerformanceComparisonResult> comparePerformance(@PathVariable String deploymentId) {
-    //   try {
-    //     PerformanceComparisonResult result = performanceComparisonService.compare(deploymentId);
-    //     return ApiResponse.success("성능 비교 완료", result);
-    //   } catch (Exception e) {
-    //     log.error("Failed to compare performance", e);
-    //     throw new RuntimeException("성능 비교 실패: " + e.getMessage(), e);
-    //   }
-    // }
-    //
-    // 구현 필요:
-    // 1. PerformanceComparisonService 주입
-    // 2. 위의 메서드 구현 (위의 주석 제거)
-    // 3. DeploymentResult에서 Blue/Green URL 조회
-    // 4. 각 URL에 병렬로 5회씩 HTTP 요청
-    // 5. 레이턴시, 에러율 측정 및 비교
 }

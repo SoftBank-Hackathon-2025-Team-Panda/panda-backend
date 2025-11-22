@@ -535,7 +535,28 @@ reconnect: 5000
 
 #### 이벤트 타입
 
-##### 1. Stage 이벤트 (배포 진행)
+##### 1. Connected 이벤트 (SSE 연결 확립)
+```
+event: connected
+data: {
+  "message": "SSE connection established"
+}
+```
+
+**설명**: SSE 연결이 성공적으로 확립되었음을 알립니다.
+- 클라이언트가 연결 요청 직후 가장 먼저 받는 이벤트
+- 이 이벤트를 받으면 SSE 연결이 안정적으로 이루어졌음을 확인
+- 이후 배포 관련 이벤트들이 스트리밍됨
+
+**예제**:
+```
+id: 550e8400-e29b-41d4-a716-446655440001
+event: connected
+data: {"message":"SSE connection established"}
+reconnect: 5000
+```
+
+##### 2. Stage 이벤트 (배포 진행)
 ```
 event: stage
 data: {
@@ -560,7 +581,7 @@ data: {"type":"stage","message":"[Stage 1] Dockerfile 탐색 및 Docker Build - 
 reconnect: 5000
 ```
 
-##### 2. Success 이벤트 (배포 완료)
+##### 3. Success 이벤트 (배포 완료)
 ```
 event: success
 data: {
@@ -580,7 +601,7 @@ data: {"message":"Deployment completed successfully"}
 reconnect: 5000
 ```
 
-##### 3. Fail 이벤트 (배포 실패)
+##### 4. Fail 이벤트 (배포 실패)
 ```
 event: fail
 data: {
@@ -608,8 +629,10 @@ reconnect: 5000
 
 
 ### 주의사항
-- **연결 유지**: SSE 연결은 배포 완료/실패 후 자동 종료
-- **히스토리**: 신규 클라이언트가 연결하면 과거 이벤트 자동 전송
+- **연결 확인**: Connected 이벤트를 받으면 SSE 연결이 안정적으로 이루어짐을 확인
+- **이벤트 순서**: Connected → (Stage 이벤트들...) → Success/Fail
+- **연결 유지**: SSE 연결은 Success/Fail 이벤트 발행 후 5초 경과 시 자동 종료
+- **히스토리**: 신규 클라이언트가 연결하면 Connected 이후 과거 배포 이벤트 자동 전송
 - **순서 보장**: 이벤트는 발생 순서대로 전송됨
 
 ---
@@ -836,6 +859,27 @@ GET /api/v1/deploy/{deploymentId}/result
 # SSE 스트리밍 상세
 
 ## 이벤트 타입별 페이로드
+
+### Connected 이벤트 (SSE 연결 확립)
+
+#### 연결 확립
+```json
+{
+  "message": "SSE connection established"
+}
+```
+
+**발생 시점**: 클라이언트가 SSE 연결 요청 직후 (가장 먼저 수신)
+
+**클라이언트 처리**:
+```javascript
+eventSource.addEventListener('connected', (event) => {
+  console.log('SSE 연결 성공:', JSON.parse(event.data).message);
+  // UI: 연결 표시
+});
+```
+
+---
 
 ### Stage 1: Dockerfile 탐색 및 Docker Build
 
