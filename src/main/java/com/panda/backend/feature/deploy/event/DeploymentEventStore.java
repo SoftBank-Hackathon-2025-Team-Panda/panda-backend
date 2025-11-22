@@ -64,10 +64,10 @@ public class DeploymentEventStore {
                             .name(eventType)
                             .reconnectTime(5000);
 
-                    // "stage" 타입만 data 포함, "done"과 "error"는 message만 전송
+                    // "stage" 타입만 data 포함, "success"와 "fail"는 message만 전송
                     if ("stage".equals(eventType)) {
                         eventBuilder.data(event);
-                    } else if ("done".equals(eventType) || "error".equals(eventType)) {
+                    } else if ("success".equals(eventType) || "fail".equals(eventType)) {
                         eventBuilder.data(Map.of("message", event.getMessage()));
                     }
 
@@ -85,10 +85,10 @@ public class DeploymentEventStore {
         }
     }
 
-    // "done" 이벤트 전송 (배포 완료)
+    // "success" 이벤트 전송 (배포 완료)
     public void sendDoneEvent(String deploymentId, String message) {
         DeploymentEvent event = new DeploymentEvent();
-        event.setType("done");
+        event.setType("success");
         event.setMessage(message);
 
         broadcastEvent(deploymentId, event);
@@ -107,10 +107,25 @@ public class DeploymentEventStore {
         }).start();
     }
 
-    // "error" 이벤트 전송 (배포 실패)
+    // "deployment ready" 상태 전송 (배포 준비 완료, 수동 전환 대기)
+    public void sendDeploymentReadyEvent(String deploymentId, Map<String, Object> details) {
+        DeploymentEvent event = new DeploymentEvent();
+        event.setType("stage");
+        event.setMessage("[Stage 4] Green 서비스 배포 완료 - 트래픽 전환 대기 중");
+        event.setDetails(details != null ? details : Map.of("stage", 4));
+
+        broadcastEvent(deploymentId, event);
+
+        // 배포 결과 저장
+        saveDeploymentResult(deploymentId, "DEPLOYMENT_READY");
+
+        log.info("Deployment ready event sent for deploymentId: {}", deploymentId);
+    }
+
+    // "fail" 이벤트 전송 (배포 실패)
     public void sendErrorEvent(String deploymentId, String message) {
         DeploymentEvent event = new DeploymentEvent();
-        event.setType("error");
+        event.setType("fail");
         event.setMessage(message);
 
         broadcastEvent(deploymentId, event);

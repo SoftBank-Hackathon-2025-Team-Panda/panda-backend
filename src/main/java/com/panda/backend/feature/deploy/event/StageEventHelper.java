@@ -24,8 +24,6 @@ public class StageEventHelper {
         STAGE_DESCRIPTIONS.put(2, "ECR에 이미지 Push");
         STAGE_DESCRIPTIONS.put(3, "ECS 배포 시작");
         STAGE_DESCRIPTIONS.put(4, "CodeDeploy Blue/Green Lifecycle");
-        STAGE_DESCRIPTIONS.put(5, "HealthCheck 및 트래픽 전환");
-        STAGE_DESCRIPTIONS.put(6, "배포 완료");
     }
 
     /**
@@ -135,48 +133,39 @@ public class StageEventHelper {
         publishProgress("CodeDeploy Lifecycle Hook: " + hookName);
     }
 
-    /**
-     * Stage 5: HealthCheck 및 트래픽 전환
-     */
-    public void stage5Start(String greenUrl) {
-        updateStage(5, "Green 서비스 HealthCheck 및 트래픽 전환");
-        publishProgress("HealthCheck 시작", Map.of("url", greenUrl));
-    }
-
-    public void stage5HealthCheckRunning(String greenUrl) {
+    public void stage4HealthCheckRunning(String greenUrl) {
         publishProgress("Green 서비스 HealthCheck 진행 중", Map.of("url", greenUrl));
     }
 
-    public void stage5HealthCheckPassed(String greenUrl, int passedChecks) {
+    public void stage4HealthCheckPassed(String greenUrl, int passedChecks) {
         publishProgress("HealthCheck 성공", Map.of(
                 "url", greenUrl,
                 "passedChecks", passedChecks
         ));
     }
 
-    public void stage5HealthCheckFailed(String greenUrl, String reason) {
-        publishProgress("HealthCheck 실패: " + reason, Map.of("url", greenUrl));
-    }
-
-    public void stage5TrafficSwitching(String fromService, String toService) {
+    public void stage4TrafficSwitching(String fromService, String toService) {
         publishProgress("트래픽 전환 중", Map.of(
                 "from", fromService,
                 "to", toService
         ));
     }
 
-    public void stage5TrafficSwitched(String toService) {
+    public void stage4TrafficSwitched(String toService) {
         publishProgress("트래픽 전환 완료", Map.of("activeService", toService));
     }
 
-    /**
-     * Stage 6: 배포 완료
-     */
-    public void stage6Complete(String finalService, String blueUrl, String greenUrl) {
-        publishProgress("배포 완료", Map.of(
-                "finalService", finalService,
+    public void stage4HealthCheckFailed(String greenUrl, String reason) {
+        publishProgress("HealthCheck 실패: " + reason, Map.of("url", greenUrl));
+    }
+
+    public void stage4DeploymentReady(String blueServiceArn, String greenServiceArn, String blueUrl, String greenUrl) {
+        publishProgress("Green 서비스 배포 완료 - 트래픽 전환 대기 중", Map.of(
+                "blueServiceArn", blueServiceArn,
+                "greenServiceArn", greenServiceArn,
                 "blueUrl", blueUrl,
-                "greenUrl", greenUrl
+                "greenUrl", greenUrl,
+                "message", "POST /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요"
         ));
     }
 

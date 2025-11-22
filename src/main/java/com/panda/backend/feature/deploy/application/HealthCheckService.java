@@ -29,7 +29,7 @@ public class HealthCheckService {
     private final CodeDeployTrafficSwitchService codeDeployTrafficSwitchService;
 
     /**
-     * Stage 5: HealthCheck & Traffic Switching
+     * Stage 4: HealthCheck & Traffic Switching (Stage 4의 일부)
      * - Green 서비스에 5번 HTTP 요청 (2초 간격)
      * - 각 체크마다 최대 3번 재시도
      * - 레이턴시 측정
@@ -43,7 +43,7 @@ public class HealthCheckService {
         ElasticLoadBalancingV2Client elbClient = createElbClient(awsConnection);
 
         try {
-            stageHelper.stage5HealthCheckRunning(greenUrl);
+            stageHelper.stage4HealthCheckRunning(greenUrl);
             log.info("Starting health check for green service at {}", greenUrl);
 
             // 1. 5번의 Health Check 실행 (2초 간격)
@@ -103,7 +103,7 @@ public class HealthCheckService {
                     log.warn("Health check {}/5 failed after 3 retries: {}", i, lastError);
                 }
 
-                stageHelper.stage5HealthCheckRunning(String.format("%s - Check %d/5 (%s)",
+                stageHelper.stage4HealthCheckRunning(String.format("%s - Check %d/5 (%s)",
                         greenUrl, i, checkPassed ? "Passed" : "Failed"));
 
                 // 2초 간격으로 다음 체크 실행 (마지막 체크는 대기 안함)
@@ -123,12 +123,12 @@ public class HealthCheckService {
             double averageLatency = totalLatency / (double) (passedChecks + failedChecks);
             double errorRate = (failedChecks * 100.0) / 5.0;
 
-            stageHelper.stage5HealthCheckPassed(greenUrl, passedChecks);
+            stageHelper.stage4HealthCheckPassed(greenUrl, passedChecks);
             log.info("Health check passed - Passed: {}, Failed: {}, Average Latency: {}ms, Error Rate: {}%",
                     passedChecks, failedChecks, (long) averageLatency, String.format("%.1f", errorRate));
 
             // 3. CodeDeploy 트래픽 전환 승인
-            stageHelper.stage5TrafficSwitching("blue", "green");
+            stageHelper.stage4TrafficSwitching("blue", "green");
             log.info("Approving traffic switch from blue to green via CodeDeploy");
 
             try {
@@ -145,16 +145,16 @@ public class HealthCheckService {
 
             Thread.sleep(1000);
 
-            stageHelper.stage5TrafficSwitched("green");
+            stageHelper.stage4TrafficSwitched("green");
             log.info("Traffic switch completed for deploymentId: {}", deploymentId);
 
         } catch (HealthCheckException e) {
             log.error("Health check failed: {}", e.getMessage());
-            stageHelper.stage5HealthCheckFailed(greenUrl, e.getMessage());
+            stageHelper.stage4HealthCheckFailed(greenUrl, e.getMessage());
             throw e;
         } catch (Exception e) {
             log.error("Health check error: {}", e.getMessage());
-            stageHelper.stage5HealthCheckFailed(greenUrl, e.getMessage());
+            stageHelper.stage4HealthCheckFailed(greenUrl, e.getMessage());
             throw new HealthCheckException("Health check error: " + e.getMessage(), deploymentId);
         } finally {
             elbClient.close();

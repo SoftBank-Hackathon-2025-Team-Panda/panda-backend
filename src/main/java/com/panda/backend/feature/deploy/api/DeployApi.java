@@ -32,6 +32,14 @@ public interface DeployApi {
     )
     SseEmitter streamEvents(@PathVariable String deploymentId);
 
+    @PostMapping("/api/v1/deploy/{deploymentId}/switch")
+    @Operation(
+        summary = "배포 전환 실행 (수동 확인)",
+        description = "Stage 4에서 Green 서비스 배포가 완료되면, 사용자가 준비 상태를 확인한 후 이 API를 호출하여 " +
+                     "트래픽을 Blue에서 Green으로 전환합니다."
+    )
+    ApiResponse<?> switchTraffic(@PathVariable String deploymentId);
+
     @GetMapping("/api/v1/deploy/{deploymentId}/result")
     @Operation(
         summary = "배포 최종 결과 조회",

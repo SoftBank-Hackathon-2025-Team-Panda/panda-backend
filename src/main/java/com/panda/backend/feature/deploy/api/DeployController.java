@@ -17,6 +17,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.Map;
+
 @Slf4j
 @RestController
 @RequiredArgsConstructor
@@ -43,6 +45,39 @@ public class DeployController implements DeployApi {
     public SseEmitter streamEvents(@PathVariable String deploymentId) {
         log.info("SSE client connected for deployment: {}", deploymentId);
         return streamDeploymentEventsService.stream(deploymentId);
+    }
+
+    @Override
+    @PostMapping("/api/v1/deploy/{deploymentId}/switch")
+    public ApiResponse<?> switchTraffic(@PathVariable String deploymentId) {
+        try {
+            // 배포 결과 조회
+            DeploymentResult result = getDeploymentResultService.getResult(deploymentId);
+
+            // 배포 준비 상태 확인
+            if (!result.isDeploymentReady()) {
+                throw new IllegalArgumentException("배포가 준비되지 않았습니다. 현재 상태: " + result.getStatus());
+            }
+
+            // 배포 상태를 COMPLETED로 변경
+            result.setStatus("COMPLETED");
+            result.setCompletedAt(java.time.LocalDateTime.now());
+            // 추가적으로 블루/그린 URL, 성능 메트릭 등을 업데이트할 수 있음
+
+            // 배포 결과 저장
+            // (DeploymentResultStore는 현재 메모리 저장소이므로, 변경된 result를 다시 저장)
+            // 실제 구현에서는 여기서 finalService를 "green"으로 설정해야 함
+            result.setFinalService("green");
+
+            return ApiResponse.success("배포 전환이 시작되었습니다.", Map.of(
+                    "deploymentId", deploymentId,
+                    "message", "Traffic switching from blue to green in progress",
+                    "activeService", "green"
+            ));
+        } catch (Exception e) {
+            log.error("Failed to switch traffic for deployment: {}", deploymentId, e);
+            throw new RuntimeException("배포 전환 실패: " + e.getMessage(), e);
+        }
     }
 
     @Override

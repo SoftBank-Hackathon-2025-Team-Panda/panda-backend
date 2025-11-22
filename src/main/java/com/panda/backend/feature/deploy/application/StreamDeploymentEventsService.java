@@ -51,7 +51,7 @@ public class StreamDeploymentEventsService {
         // Event 타입에 따라 데이터 설정
         if ("stage".equals(eventType)) {
             builder.data(event);
-        } else if ("done".equals(eventType) || "error".equals(eventType)) {
+        } else if ("success".equals(eventType) || "fail".equals(eventType)) {
             builder.data(Map.of("message", event.getMessage()));
         }
 

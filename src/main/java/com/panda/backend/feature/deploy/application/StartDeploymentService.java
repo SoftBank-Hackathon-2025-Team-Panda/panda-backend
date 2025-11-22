@@ -4,17 +4,20 @@ import com.panda.backend.feature.connect.entity.AwsConnection;
 import com.panda.backend.feature.connect.entity.GitHubConnection;
 import com.panda.backend.feature.deploy.dto.DeployRequest;
 import com.panda.backend.feature.deploy.dto.DeployResponse;
+import com.panda.backend.feature.deploy.dto.DeploymentResult;
 import com.panda.backend.feature.deploy.dto.RegisterEventBusRequest;
 import com.panda.backend.feature.deploy.dto.RegisterEventBusResponse;
 import com.panda.backend.feature.deploy.event.DeploymentEventPublisher;
 import com.panda.backend.feature.deploy.event.DeploymentEventStore;
 import com.panda.backend.feature.deploy.infrastructure.DeploymentTask;
 import com.panda.backend.feature.deploy.infrastructure.DeploymentTaskExecutor;
+import com.panda.backend.feature.deploy.infrastructure.DeploymentResultStore;
 import com.panda.backend.feature.connect.infrastructure.ConnectionStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Slf4j
@@ -29,6 +32,7 @@ public class StartDeploymentService {
     private final DeploymentTaskExecutor deploymentTaskExecutor;
     private final EventBridgeRuleService eventBridgeRuleService;
     private final LambdaInvocationService lambdaInvocationService;
+    private final DeploymentResultStore deploymentResultStore;
 
     public DeployResponse start(DeployRequest request) {
         // GitHub 연결 확인
@@ -50,6 +54,29 @@ public class StartDeploymentService {
                 request.getBranch(),
                 awsConnection.getRegion()
         );
+
+        // 초기 배포 결과 생성 및 저장 (SSE 연결 시에 조회할 수 있도록)
+        DeploymentResult initialResult = DeploymentResult.builder()
+                .deploymentId(deploymentId)
+                .status("RUNNING")
+                .owner(request.getOwner())
+                .repo(request.getRepo())
+                .branch(request.getBranch())
+                .startedAt(LocalDateTime.now())
+                .completedAt(null)
+                .durationSeconds(0L)
+                .finalService(null)
+                .blueUrl(null)
+                .greenUrl(null)
+                .errorMessage(null)
+                .blueLatencyMs(null)
+                .greenLatencyMs(null)
+                .blueErrorRate(null)
+                .greenErrorRate(null)
+                .eventCount(0)
+                .build();
+        deploymentResultStore.save(initialResult);
+        log.info("Initial deployment result saved - deploymentId: {}", deploymentId);
 
         // ========== Step 1: EventBridge Rule 생성 ==========
         try {

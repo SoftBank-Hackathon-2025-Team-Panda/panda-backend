@@ -11,7 +11,7 @@
    - [3️⃣ 저장된 연결 조회](#3️⃣-저장된-연결-조회)
 6. [Deployment API](#deployment-api)
 7. [SSE 스트리밍 상세](#sse-스트리밍-상세)
-8. [예제 및 시나리오](#예제-및-시나리오)
+8. [FAQ](#faq)
 
 ---
 
@@ -31,6 +31,7 @@
 | **Connection** | `GET /api/v1/connections` | 저장된 모든 연결 조회 |
 | **Deployment** | `POST /api/v1/deploy` | 배포 시작 |
 | **Deployment** | `GET /api/v1/deploy/{id}/events` | 실시간 이벤트 스트리밍 (SSE) |
+| **Deployment** | `POST /api/v1/deploy/{id}/switch` | 배포 전환 실행 (수동 확인) |
 | **Deployment** | `GET /api/v1/deploy/{id}/result` | 배포 결과 조회 |
 
 ### 포트 및 엔드포인트
@@ -473,9 +474,7 @@ Content-Type: application/json
 1. **Stage 1**: Dockerfile 탐색 및 Docker Build
 2. **Stage 2**: ECR로 이미지 Push
 3. **Stage 3**: ECS 배포 시작
-4. **Stage 4**: CodeDeploy Blue/Green Lifecycle
-5. **Stage 5**: HealthCheck 및 트래픽 전환
-6. **Stage 6**: 배포 완료
+4. **Stage 4**: CodeDeploy Blue/Green Lifecycle (배포 자동 완료, 수동 전환 대기)
 
 ### 타임아웃
 - 전체 배포: 30분
@@ -561,9 +560,9 @@ data: {"type":"stage","message":"[Stage 1] Dockerfile 탐색 및 Docker Build - 
 reconnect: 5000
 ```
 
-##### 2. Done 이벤트 (배포 완료)
+##### 2. Success 이벤트 (배포 완료)
 ```
-event: done
+event: success
 data: {
   "message": "Deployment completed successfully"
 }
@@ -576,14 +575,14 @@ data: {
 **예제**:
 ```
 id: 550e8400-e29b-41d4-a716-446655440050
-event: done
+event: success
 data: {"message":"Deployment completed successfully"}
 reconnect: 5000
 ```
 
-##### 3. Error 이벤트 (배포 실패)
+##### 3. Fail 이벤트 (배포 실패)
 ```
-event: error
+event: fail
 data: {
   "message": "Deployment failed: Docker build failed: ..."
 }
@@ -596,7 +595,7 @@ data: {
 **예제**:
 ```
 id: 550e8400-e29b-41d4-a716-446655440051
-event: error
+event: fail
 data: {"message":"Deployment timed out at Stage 1 after 605 seconds"}
 reconnect: 5000
 ```
@@ -615,7 +614,91 @@ reconnect: 5000
 
 ---
 
-## 6️⃣ 배포 최종 결과 조회
+## 6️⃣ 배포 전환 실행 (수동 확인)
+
+### 엔드포인트
+```
+POST /api/v1/deploy/{deploymentId}/switch
+```
+
+### 설명
+Stage 4에서 Green 서비스 배포가 완료되면, 사용자가 준비 상태를 확인한 후 이 API를 호출하여 트래픽을 Blue에서 Green으로 전환합니다.
+이를 통해 Blue/Green 배포의 마지막 단계를 수동으로 제어할 수 있습니다.
+
+### 요청
+
+#### Path Parameters
+| 파라미터 | 타입 | 필수 | 설명 | 예제 |
+|---------|------|------|------|------|
+| **deploymentId** | String | ✅ | 배포 ID | `"dep_k1l2m3n4o5"` |
+
+#### Headers
+```
+Content-Type: application/json
+```
+
+### 응답
+
+#### 성공 (200)
+```json
+{
+  "code": 200,
+  "message": "배포 전환이 시작되었습니다.",
+  "data": {
+    "deploymentId": "dep_k1l2m3n4o5",
+    "message": "Traffic switching from blue to green in progress",
+    "activeService": "green"
+  }
+}
+```
+
+#### 응답 필드
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| **code** | Integer | HTTP 상태 코드 |
+| **message** | String | 성공 메시지 |
+| **data.deploymentId** | String | 배포 ID |
+| **data.message** | String | 전환 상태 메시지 |
+| **data.activeService** | String | 활성 서비스 (`green`) |
+
+#### 실패 - 이미 전환됨 (400)
+```json
+{
+  "timestamp": "2024-01-01T12:00:00",
+  "status": 400,
+  "error": "Deployment Error",
+  "message": "Traffic has already been switched to green"
+}
+```
+
+#### 실패 - 배포 미완료 (400)
+```json
+{
+  "timestamp": "2024-01-01T12:00:00",
+  "status": 400,
+  "error": "Deployment Error",
+  "message": "Deployment is not ready for traffic switch. Current stage: 3"
+}
+```
+
+### 가능한 에러
+| 에러 메시지 | 원인 | 해결 방법 |
+|-----------|------|---------|
+| `Deployment not found` | deploymentId 유효하지 않음 | deploymentId 확인 |
+| `Traffic has already been switched` | 이미 전환됨 | 배포 완료, 재전환 불가 |
+| `Deployment is not ready` | Stage 4 미완료 | Stage 4 완료 후 재시도 |
+| `Traffic switch failed` | 트래픽 전환 중 오류 | AWS IAM 권한 확인, 재시도 |
+
+### 전환 프로세스
+1. Green 서비스 HealthCheck 실행 (자동)
+2. HealthCheck 성공 확인
+3. Application Load Balancer (ALB) Target Group 수정
+4. Blue → Green 트래픽 전환 완료
+5. 배포 상태 업데이트
+
+---
+
+## 7️⃣ 배포 최종 결과 조회
 
 ### 엔드포인트
 ```
@@ -623,8 +706,9 @@ GET /api/v1/deploy/{deploymentId}/result
 ```
 
 ### 설명
-완료된 배포의 최종 결과를 조회합니다.
-배포가 완료된 후에만 이 API를 호출할 수 있습니다.
+배포의 최종 결과를 조회합니다.
+- Stage 4 완료 후: 배포 준비 완료, 수동 전환 대기 상태
+- 수동 전환 완료 후: 배포 완료 상태
 
 ### 요청
 
@@ -635,7 +719,34 @@ GET /api/v1/deploy/{deploymentId}/result
 
 ### 응답
 
-#### 성공 (200)
+#### 성공 - Stage 4 완료 (배포 준비 완료, 전환 대기)
+```json
+{
+  "code": 200,
+  "message": "배포 결과 조회 성공",
+  "data": {
+    "deploymentId": "dep_k1l2m3n4o5",
+    "status": "DEPLOYMENT_READY",
+    "owner": "your-org",
+    "repo": "your-repo",
+    "branch": "main",
+    "startedAt": "2024-01-01T12:00:00",
+    "completedAt": "2024-01-01T12:08:30",
+    "durationSeconds": 510,
+    "finalService": null,
+    "blueUrl": "http://blue.example.com",
+    "greenUrl": "http://green.example.com",
+    "errorMessage": null,
+    "blueLatencyMs": null,
+    "greenLatencyMs": null,
+    "blueErrorRate": null,
+    "greenErrorRate": null,
+    "eventCount": 35
+  }
+}
+```
+
+#### 성공 - 전환 완료 (배포 완료)
 ```json
 {
   "code": 200,
@@ -647,8 +758,8 @@ GET /api/v1/deploy/{deploymentId}/result
     "repo": "your-repo",
     "branch": "main",
     "startedAt": "2024-01-01T12:00:00",
-    "completedAt": "2024-01-01T12:10:30",
-    "durationSeconds": 630,
+    "completedAt": "2024-01-01T12:09:00",
+    "durationSeconds": 540,
     "finalService": "green",
     "blueUrl": "http://blue.example.com",
     "greenUrl": "http://green.example.com",
@@ -657,7 +768,7 @@ GET /api/v1/deploy/{deploymentId}/result
     "greenLatencyMs": 180,
     "blueErrorRate": 0.01,
     "greenErrorRate": 0.005,
-    "eventCount": 47
+    "eventCount": 45
   }
 }
 ```
@@ -666,21 +777,21 @@ GET /api/v1/deploy/{deploymentId}/result
 | 필드 | 타입 | 설명 |
 |------|------|------|
 | **deploymentId** | String | 배포 ID |
-| **status** | String | 배포 상태 (`COMPLETED`, `FAILED`) |
+| **status** | String | 배포 상태 (`DEPLOYMENT_READY`: 전환 대기, `COMPLETED`: 완료, `FAILED`: 실패) |
 | **owner** | String | GitHub 조직명 |
 | **repo** | String | GitHub 레포 명 |
 | **branch** | String | 배포한 브랜치 |
 | **startedAt** | DateTime | 배포 시작 시간 |
-| **completedAt** | DateTime | 배포 완료 시간 |
+| **completedAt** | DateTime | Stage 4 또는 전환 완료 시간 |
 | **durationSeconds** | Long | 배포 소요 시간 (초) |
-| **finalService** | String | 활성 서비스 (`blue`, `green`) |
+| **finalService** | String | 활성 서비스 (`blue`, `green`, null: 전환 대기 중) |
 | **blueUrl** | String | Blue 서비스 URL |
 | **greenUrl** | String | Green 서비스 URL |
 | **errorMessage** | String | 배포 실패 시 에러 메시지 (null이면 성공) |
-| **blueLatencyMs** | Long | Blue 서비스 응답 시간 (ms) |
-| **greenLatencyMs** | Long | Green 서비스 응답 시간 (ms) |
-| **blueErrorRate** | Double | Blue 서비스 에러율 (0.0 ~ 1.0) |
-| **greenErrorRate** | Double | Green 서비스 에러율 (0.0 ~ 1.0) |
+| **blueLatencyMs** | Long | Blue 서비스 응답 시간 (ms, 전환 완료 후만) |
+| **greenLatencyMs** | Long | Green 서비스 응답 시간 (ms, 전환 완료 후만) |
+| **blueErrorRate** | Double | Blue 서비스 에러율 (0.0 ~ 1.0, 전환 완료 후만) |
+| **greenErrorRate** | Double | Green 서비스 에러율 (0.0 ~ 1.0, 전환 완료 후만) |
 | **eventCount** | Integer | 발행된 이벤트 개수 |
 
 #### 배포 실패 (200 with FAILED status)
@@ -933,123 +1044,18 @@ GET /api/v1/deploy/{deploymentId}/result
 }
 ```
 
-#### Stage 4 완료 - 최종 상태
-```json
-{
-  "type": "success",
-  "message": "배포가 성공했습니다.",
-  "details": {
-    "stage": 4
-  }
-}
-```
-
-또는 실패 시:
-```json
-{
-  "type": "fail",
-  "message": "배포가 실패했습니다.",
-  "details": {
-    "stage": 4
-  }
-}
-```
-
-### Stage 5: HealthCheck & 트래픽 전환
-
-#### Stage 시작
+#### Stage 4 완료 - 배포 준비 완료 (수동 전환 대기)
 ```json
 {
   "type": "stage",
-  "message": "[Stage 5] Green 서비스 HealthCheck 및 트래픽 전환",
+  "message": "[Stage 4] Green 서비스 배포 완료 - 트래픽 전환 대기 중",
   "details": {
-    "stage": 5,
-    "url": "http://green.example.com"
-  }
-}
-```
-
-#### HealthCheck 진행 중 (5회)
-```json
-{
-  "type": "stage",
-  "message": "[Stage 5] Green 서비스 HealthCheck 진행 중 - Check 1/5",
-  "details": {
-    "stage": 5,
-    "url": "http://green.example.com"
-  }
-}
-```
-
-#### HealthCheck 성공
-```json
-{
-  "type": "stage",
-  "message": "[Stage 5] HealthCheck 성공",
-  "details": {
-    "stage": 5,
-    "url": "http://green.example.com",
-    "passedChecks": 5
-  }
-}
-```
-
-#### 트래픽 전환 중
-```json
-{
-  "type": "stage",
-  "message": "[Stage 5] 트래픽 전환 중",
-  "details": {
-    "stage": 5,
-    "from": "blue",
-    "to": "green"
-  }
-}
-```
-
-#### 트래픽 전환 완료
-```json
-{
-  "type": "stage",
-  "message": "[Stage 5] 트래픽 전환 완료",
-  "details": {
-    "stage": 5,
-    "activeService": "green"
-  }
-}
-```
-
-### Stage 6: 배포 완료
-```json
-{
-  "type": "stage",
-  "message": "[Stage 6] 배포 완료",
-  "details": {
-    "stage": 6,
-    "finalService": "green",
+    "stage": 4,
+    "blueServiceArn": "arn:aws:ecs:ap-northeast-2:123456789012:service/panda-cluster/panda-blue",
+    "greenServiceArn": "arn:aws:ecs:ap-northeast-2:123456789012:service/panda-cluster/panda-green",
     "blueUrl": "http://blue.example.com",
-    "greenUrl": "http://green.example.com"
+    "greenUrl": "http://green.example.com",
+    "message": "POST /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요"
   }
 }
 ```
-
----
-
-## FAQ
-
-### Q1. 배포 중 클라이언트가 연결을 끊으면 어떻게 되나요?
-**A**: 배포는 계속 진행됩니다. 다시 SSE 연결을 하면 기존 진행 상황을 자동으로 받습니다.
-
-### Q2. 같은 저장소에 동시에 여러 배포를 시작할 수 있나요?
-**A**: 가능합니다. ThreadPool은 최대 10개까지 동시 배포를 처리할 수 있습니다.
-
-### Q3. 배포 중 예외가 발생하면 자동으로 정리되나요?
-**A**: 네, 모든 예외는 DeploymentErrorHandler에서 처리되고, SSE 클라이언트에 에러 이벤트를 전송합니다.
-
-### Q4. 배포 결과는 얼마나 오래 보관되나요?
-**A**: 최대 1000개의 배포 결과가 메모리에 보관됩니다. 초과하면 가장 오래된 것부터 삭제됩니다.
-
-### Q5. 30분 타임아웃 후에는 어떻게 되나요?
-**A**: CompletableFuture가 자동으로 TimeoutException을 발생시키고, DeploymentErrorHandler가 처리하여 배포 실패 상태로 저장됩니다.
-
----

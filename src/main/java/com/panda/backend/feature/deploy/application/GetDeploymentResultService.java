@@ -65,7 +65,18 @@ public class GetDeploymentResultService {
      */
     public boolean isCompleted(String deploymentId) {
         DeploymentResult result = getResultOrNull(deploymentId);
-        return result != null && (result.isSuccessful() || result.isFailed());
+        return result != null && result.isCompleted();
+    }
+
+    /**
+     * 배포 준비가 완료되었는지 확인 (전환 대기 중)
+     *
+     * @param deploymentId 배포 ID
+     * @return 배포 준비 완료 여부
+     */
+    public boolean isDeploymentReady(String deploymentId) {
+        DeploymentResult result = getResultOrNull(deploymentId);
+        return result != null && result.isDeploymentReady();
     }
 
     /**

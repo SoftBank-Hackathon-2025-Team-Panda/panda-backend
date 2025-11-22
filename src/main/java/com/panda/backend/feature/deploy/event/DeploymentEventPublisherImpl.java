@@ -42,7 +42,7 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
         try {
             // 성공 이벤트 발행
             DeploymentEvent event = new DeploymentEvent();
-            event.setType("done");
+            event.setType("success");
             event.setMessage("Deployment completed successfully");
             event.setDetails(Map.of(
                     "finalService", finalService,
@@ -129,9 +129,9 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
             case "ENSURE_INFRA_COMPLETED" -> 3;
             case "REGISTER_TASK_IN_PROGRESS" -> 4;
             case "REGISTER_TASK_COMPLETED" -> 4;
-            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> 5;
-            case "SUCCEEDED" -> 6;
-            case "FAILED" -> 6;
+            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> 4;
+            case "SUCCEEDED" -> 4;
+            case "FAILED" -> 4;
             default -> 3;
         };
     }

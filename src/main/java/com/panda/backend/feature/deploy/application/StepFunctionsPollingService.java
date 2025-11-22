@@ -60,6 +60,21 @@ public class StepFunctionsPollingService {
     private final ExecutorService executorService = Executors.newFixedThreadPool(10);
 
     /**
+     * ✅ 폴링 결과를 반환하는 내부 클래스
+     * - currentStage: 현재 단계
+     * - lastEventId: 처리한 마지막 이벤트 ID (다음 폴링에서 중복 제거용)
+     */
+    private static class PollingResult {
+        String currentStage;
+        long lastEventId;
+
+        PollingResult(String currentStage, long lastEventId) {
+            this.currentStage = currentStage;
+            this.lastEventId = lastEventId;
+        }
+    }
+
+    /**
      * 비동기로 Step Functions 폴링 시작
      * ECR 푸시 완료 직후 호출되어야 함
      *
@@ -95,6 +110,7 @@ public class StepFunctionsPollingService {
         long lastMonitoringTime = System.currentTimeMillis();
         String executionArn = null;
         String previousStage = null;
+        long lastProcessedEventId = 0L;  // ✅ 마지막 처리한 이벤트 ID 추적
         int pollCount = 0;
         int eventCount = 0;
         String secretName = "panda/stepfunctions/" + owner.toLowerCase() + "-" + repo.toLowerCase() + "-latest-execution";
@@ -146,11 +162,20 @@ public class StepFunctionsPollingService {
                             .build()
                     );
 
-                    // 현재 stage 분석 (모니터링 컨텍스트 업데이트)
-                    String currentStage = analyzeExecutionHistoryWithContext(deploymentId, history.events(),
-                        monitoringContext, awsConnection);
+                    // ✅ 현재 stage 분석 (마지막 처리한 이벤트 ID 이후의 이벤트만 처리)
+                    PollingResult pollingResult = analyzeExecutionHistoryWithContext(
+                        deploymentId,
+                        history.events(),
+                        monitoringContext,
+                        awsConnection,
+                        lastProcessedEventId
+                    );
 
-                    log.debug("Poll #{} - deploymentId: {}, stage: {}", pollCount, deploymentId, currentStage);
+                    String currentStage = pollingResult.currentStage;
+                    lastProcessedEventId = pollingResult.lastEventId;  // ✅ 마지막 이벤트 ID 업데이트
+
+                    log.debug("Poll #{} - deploymentId: {}, stage: {}, lastEventId: {}",
+                        pollCount, deploymentId, currentStage, lastProcessedEventId);
 
                     // 상태 변화 감지 및 모니터링 정보 저장
                     if (!Objects.equals(currentStage, previousStage)) {
@@ -160,26 +185,9 @@ public class StepFunctionsPollingService {
                         eventCount++;
                     }
 
-                    // Stage 5에서는 주기적으로 CloudWatch 모니터링 실행
-                    if ("CHECK_DEPLOYMENT_IN_PROGRESS".equals(currentStage)) {
-                        long currentTime = System.currentTimeMillis();
-                        // 30초 주기로 모니터링 호출
-                        if (currentTime - lastMonitoringTime > monitorIntervalSeconds * 1000) {
-                            String blueServiceArn = (String) monitoringContext.get("blueServiceArn");
-                            String greenServiceArn = (String) monitoringContext.get("greenServiceArn");
-                            String clusterName = (String) monitoringContext.get("clusterName");
-                            String serviceName = (String) monitoringContext.get("serviceName");
-
-                            monitorCloudWatchMetrics(deploymentId, awsConnection,
-                                blueServiceArn, greenServiceArn, clusterName, serviceName);
-                            lastMonitoringTime = currentTime;
-                        }
-                    }
-
-                    // CheckDeployment가 ready 상태이면 배포 완료
-                    if ("CHECK_DEPLOYMENT_COMPLETED".equals(currentStage)) {
-                        log.info("CheckDeployment ready detected for deploymentId: {}, finalizing deployment", deploymentId);
-                        // Step Functions이 아직 SUCCEEDED를 반환하지 않았으면 수동으로 완료 처리
+                    // Stage 4 완료 시 배포 완료 (CheckDeployment는 이제 없음)
+                    if ("REGISTER_TASK_COMPLETED".equals(currentStage)) {
+                        log.info("RegisterTaskAndDeploy completed for deploymentId: {}, finalizing deployment", deploymentId);
                         // 최종 결과 저장
                         saveFinalDeploymentResult(deploymentId, owner, repo, branch, "SUCCEEDED",
                             monitoringContext, pollingStartTime, eventCount);
@@ -347,12 +355,8 @@ public class StepFunctionsPollingService {
                 return "REGISTER_TASK_IN_PROGRESS";
             }
 
-            // Stage 5: CheckDeployment (HealthCheck & Traffic Switch)
-            if ("CheckDeployment".equals(taskName)) {
-                publishStageEvent(deploymentId, 5, "Green 서비스 HealthCheck 및 트래픽 전환",
-                    Map.of("stage", 5));
-                return "CHECK_DEPLOYMENT_IN_PROGRESS";
-            }
+            // ✅ CheckDeployment는 Stage 5가 아니므로 무시 (내부 상태만 추적)
+            // Stage 4까지만 사용하므로 CheckDeployment 관련 이벤트는 발행하지 않음
 
         } catch (Exception e) {
             log.debug("Failed to analyze TaskStateEntered", e);
@@ -400,12 +404,8 @@ public class StepFunctionsPollingService {
                 return "REGISTER_TASK_COMPLETED";
             }
 
-            // Stage 5: CheckDeployment 완료 (HealthCheck 성공 및 트래픽 전환)
-            if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
-                Map<String, Object> details = extractHealthCheckDetails(outputMap);
-                publishStageEvent(deploymentId, 5, "트래픽 전환 완료", details);
-                return "CHECK_DEPLOYMENT_COMPLETED";
-            }
+            // ✅ CheckDeployment는 Stage 5가 아니므로 무시 (내부 상태만 추적)
+            // Stage 4까지만 사용하므로 CheckDeployment 완료 이벤트는 발행하지 않음
 
         } catch (Exception e) {
             log.debug("Failed to analyze TaskStateExited", e);
@@ -719,39 +719,50 @@ public class StepFunctionsPollingService {
      * @param awsConnection AWS 연결 정보
      * @return 현재 Stage
      */
-    private String analyzeExecutionHistoryWithContext(String deploymentId, List<?> events,
-                                                       Map<String, Object> context,
-                                                       AwsConnection awsConnection) {
+    // ✅ PollingResult를 반환하도록 변경 + lastProcessedEventId로 중복 제거
+    private PollingResult analyzeExecutionHistoryWithContext(String deploymentId, List<?> events,
+                                                              Map<String, Object> context,
+                                                              AwsConnection awsConnection,
+                                                              long lastProcessedEventId) {
         if (events == null || events.isEmpty()) {
-            return "RUNNING";
+            return new PollingResult("RUNNING", lastProcessedEventId);
         }
 
         String currentStage = "RUNNING";
+        long maxEventId = lastProcessedEventId;
 
         try {
-            // 역순으로 탐색 (최신 이벤트부터 확인)
-            for (int i = events.size() - 1; i >= 0; i--) {
-                Object eventObj = events.get(i);
-                HistoryEvent event = castToHistoryEvent(eventObj);
+            // ✅ Event를 ID 순서로 정렬 (오래된 것부터 처리하도록)
+            List<HistoryEvent> sortedEvents = events.stream()
+                .map(this::castToHistoryEvent)
+                .filter(Objects::nonNull)
+                .sorted(Comparator.comparingLong(HistoryEvent::id))
+                .toList();
 
-                if (event == null) {
+            // ✅ 정렬된 이벤트를 순서대로 탐색
+            for (HistoryEvent event : sortedEvents) {
+                // ✅ 마지막 처리한 이벤트 ID보다 작거나 같으면 스킵 (중복 제거)
+                if (event.id() <= lastProcessedEventId) {
+                    log.debug("Skipping already processed event: id={}, type={}", event.id(), event.typeAsString());
                     continue;
                 }
 
-                log.debug("Event #{}: type={}", i, event.typeAsString());
+                maxEventId = event.id();  // ✅ 현재 이벤트 ID 업데이트
+
+                log.debug("Processing Event #{}: type={}", event.id(), event.typeAsString());
 
                 // ExecutionFailed 체크
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionFailed")) {
                     log.warn("Execution failed for deploymentId: {}", deploymentId);
-                    publishStageEvent(deploymentId, 6, "배포 실패");
-                    return "FAILED";
+                    publishStageEvent(deploymentId, 4, "배포 실패");  // ✅ Stage 4까지만 사용
+                    return new PollingResult("FAILED", maxEventId);  // ✅ PollingResult 반환
                 }
 
                 // ExecutionSucceeded 체크
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionSucceeded")) {
                     log.info("Execution succeeded for deploymentId: {}", deploymentId);
-                    publishStageEvent(deploymentId, 6, "배포 완료", Map.of("finalService", "green"));
-                    return "SUCCEEDED";
+                    publishStageEvent(deploymentId, 4, "배포 완료", Map.of("finalService", "green"));  // ✅ Stage 4까지만 사용
+                    return new PollingResult("SUCCEEDED", maxEventId);  // ✅ PollingResult 반환
                 }
 
                 // TaskStateEntered 이벤트 (Task 시작)
@@ -830,7 +841,7 @@ public class StepFunctionsPollingService {
                         }
 
                         if (currentStage != null) {
-                            return currentStage;
+                            return new PollingResult(currentStage, maxEventId);  // ✅ PollingResult 반환
                         }
                     }
                 }
@@ -839,7 +850,7 @@ public class StepFunctionsPollingService {
             log.error("Error analyzing execution history for deploymentId: {}", deploymentId, e);
         }
 
-        return currentStage;
+        return new PollingResult(currentStage, maxEventId);  // ✅ PollingResult 반환
     }
 
     /**

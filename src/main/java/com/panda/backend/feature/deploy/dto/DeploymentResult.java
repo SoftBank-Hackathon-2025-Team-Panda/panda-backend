@@ -15,7 +15,7 @@ public class DeploymentResult {
 
     // 배포 기본 정보
     private String deploymentId;
-    private String status;              // COMPLETED, FAILED
+    private String status;              // RUNNING, DEPLOYMENT_READY, COMPLETED, FAILED
     private String owner;
     private String repo;
     private String branch;
@@ -46,6 +46,14 @@ public class DeploymentResult {
 
     public boolean isFailed() {
         return "FAILED".equals(status);
+    }
+
+    public boolean isDeploymentReady() {
+        return "DEPLOYMENT_READY".equals(status);
+    }
+
+    public boolean isCompleted() {
+        return isSuccessful() || isFailed() || isDeploymentReady();
     }
 
     public String getFasterService() {
