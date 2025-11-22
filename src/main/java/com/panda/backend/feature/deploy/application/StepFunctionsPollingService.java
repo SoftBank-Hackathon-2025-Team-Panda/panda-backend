@@ -486,32 +486,53 @@ public class StepFunctionsPollingService {
      */
     private String analyzeTaskStateExited(String deploymentId, HistoryEvent event, AwsConnection awsConnection) {
         try {
-            // ✅ HistoryEvent 전체를 JSON으로 변환해서 output 추출
-            String eventJson = objectMapper.writeValueAsString(event);
-            log.info("📤 [TaskStateExited-EVENT-JSON] Full HistoryEvent JSON: {}",
-                eventJson.length() > 1500 ? eventJson.substring(0, 1500) + "..." : eventJson);
+            // ✅ event.toString()에서 output 추출
+            String eventString = event.toString();
+            log.info("📤 [TaskStateExited-EVENT-STRING] Full event: {}",
+                eventString.length() > 800 ? eventString.substring(0, 800) + "..." : eventString);
 
-            Map<String, Object> eventMap = objectMapper.readValue(eventJson, Map.class);
-
-            // output을 다양한 경로에서 시도
             String taskOutput = null;
 
-            // 1번 방법: 최상위 "output" 필드
-            if (eventMap.containsKey("output")) {
-                taskOutput = (String) eventMap.get("output");
-                log.info("📤 [TaskStateExited-Output] Found output at top level");
-            }
-            // 2번 방법: taskStateExitedEventDetails 내부
-            else if (eventMap.containsKey("taskStateExitedEventDetails")) {
-                Map<String, Object> details = (Map<String, Object>) eventMap.get("taskStateExitedEventDetails");
-                if (details != null && details.containsKey("output")) {
-                    taskOutput = (String) details.get("output");
-                    log.info("📤 [TaskStateExited-Output] Found output in taskStateExitedEventDetails");
+            // 1단계: JSON 형식의 output 문자열 추출
+            // "output={...}" 또는 "output": "{\n...}" 형식에서 추출
+            int outputIdx = eventString.indexOf("output=");
+            if (outputIdx != -1) {
+                int startIdx = outputIdx + 7; // "output=" 다음부터
+                // " 또는 { 문자부터 시작
+                while (startIdx < eventString.length() &&
+                       eventString.charAt(startIdx) != '"' &&
+                       eventString.charAt(startIdx) != '{') {
+                    startIdx++;
+                }
+
+                if (startIdx < eventString.length()) {
+                    // JSON 객체의 끝을 찾기
+                    int braceCount = 0;
+                    int endIdx = startIdx;
+                    boolean inString = false;
+
+                    for (; endIdx < eventString.length(); endIdx++) {
+                        char c = eventString.charAt(endIdx);
+                        if (c == '"' && (endIdx == 0 || eventString.charAt(endIdx - 1) != '\\')) {
+                            inString = !inString;
+                        } else if (!inString) {
+                            if (c == '{') braceCount++;
+                            else if (c == '}') {
+                                braceCount--;
+                                if (braceCount == 0) {
+                                    taskOutput = eventString.substring(startIdx, endIdx + 1);
+                                    log.info("📤 [TaskStateExited-Parsed] output extracted: {}",
+                                        taskOutput.length() > 300 ? taskOutput.substring(0, 300) + "..." : taskOutput);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             if (taskOutput == null || taskOutput.isEmpty()) {
-                log.debug("TaskStateExited - No output found in any expected location");
+                log.debug("TaskStateExited - No output found, returning null");
                 return null;
             }
 
