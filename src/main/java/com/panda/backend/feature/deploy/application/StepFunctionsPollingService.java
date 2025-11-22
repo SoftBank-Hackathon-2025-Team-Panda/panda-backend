@@ -613,49 +613,62 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * RunMetrics 파싱 - AWS Step Functions TaskSucceeded output 구조 (2단계만)
-     * TaskSucceeded.output = Step Functions wrapper { output: { Payload: {...} } }
+     * RunMetrics 파싱 - AWS Step Functions TaskSucceeded output 구조
+     * Payload는 String 또는 Map 둘 다 가능 → 둘 다 처리
      * taskOutput = raw JSON string from AWS SDK
      */
     private void parseRunMetrics(String taskOutput, Map<String, Object> context) {
         try {
-            // 1️⃣ JSON 파싱
+            // 1️⃣ 1차 언래핑
             Map<String, Object> outer = objectMapper.readValue(taskOutput, Map.class);
 
-            // 2️⃣ Step Functions output wrapper 언래핑
-            Map<String, Object> outputWrapper = (Map<String, Object>) outer.get("output");
-            if (outputWrapper == null) {
-                log.warn("❌ [RunMetrics] output wrapper=null - RunMetrics 파싱 불가");
+            // 2️⃣ Step Functions Output wrapper (String 또는 Map)
+            Object outputObj = outer.get("output");
+            if (outputObj == null) {
+                log.warn("❌ [RunMetrics] output=null - RunMetrics 파싱 불가");
                 return;
             }
 
-            // 3️⃣ Payload (진짜 RunMetrics 데이터)
-            Map<String, Object> payload = (Map<String, Object>) outputWrapper.get("Payload");
-            if (payload == null) {
+            // outputObj는 Map 또는 JSON String일 수 있음 → 둘 다 처리
+            Map<String, Object> outputMap;
+            if (outputObj instanceof String) {
+                outputMap = objectMapper.readValue((String) outputObj, Map.class);
+            } else {
+                outputMap = (Map<String, Object>) outputObj;
+            }
+
+            // 3️⃣ Payload 추출 (Map 또는 String 둘 다 처리)
+            Object payloadObj = outputMap.get("Payload");
+            if (payloadObj == null) {
                 log.warn("❌ [RunMetrics] Payload=null - RunMetrics 파싱 불가");
                 return;
             }
 
-            log.info("📥 [RunMetrics-Payload] 파싱된 Payload: {}", objectMapper.writeValueAsString(payload));
+            Map<String, Object> payload;
+            if (payloadObj instanceof String) {
+                payload = objectMapper.readValue((String) payloadObj, Map.class);
+            } else {
+                payload = (Map<String, Object>) payloadObj;
+            }
 
-            // 4️⃣ blue/green 파싱
+            log.info("📥 [RunMetrics-Payload] {}", objectMapper.writeValueAsString(payload));
+
+            // 4️⃣ blue/green
             Map<String, Object> blue = (Map<String, Object>) payload.get("blue");
             Map<String, Object> green = (Map<String, Object>) payload.get("green");
 
             if (blue == null || green == null) {
-                log.warn("❌ [RunMetrics] blue 또는 green 데이터 없음");
+                log.warn("❌ [RunMetrics] blue 또는 green 없음");
                 return;
             }
 
-            // 5️⃣ context 저장
+            // 5️⃣ 저장
             context.put("blueLatencyMs", blue.get("latencyMs"));
             context.put("greenLatencyMs", green.get("latencyMs"));
             context.put("blueErrorRate", blue.get("errorRate"));
             context.put("greenErrorRate", green.get("errorRate"));
-
             context.put("blueUrl", blue.get("url"));
             context.put("greenUrl", green.get("url"));
-
             context.put("blueTargetGroupArn", blue.get("targetGroupArn"));
             context.put("greenTargetGroupArn", green.get("targetGroupArn"));
 
@@ -665,7 +678,7 @@ public class StepFunctionsPollingService {
                 context.put("latencyImprovement", comparison.get("latencyImprovement"));
             }
 
-            log.info("✅ [RunMetrics-Final] 파싱 완료 - blueLatency: {}, greenLatency: {}, blueError: {}, greenError: {}, blueUrl: {}, greenUrl: {}",
+            log.info("✅ [RunMetrics-Final] blueLatency={}, greenLatency={}, blueError={}, greenError={}, blueUrl={}, greenUrl={}",
                 context.get("blueLatencyMs"), context.get("greenLatencyMs"),
                 context.get("blueErrorRate"), context.get("greenErrorRate"),
                 context.get("blueUrl"), context.get("greenUrl"));
