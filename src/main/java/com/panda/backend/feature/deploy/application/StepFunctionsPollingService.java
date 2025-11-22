@@ -614,30 +614,17 @@ public class StepFunctionsPollingService {
 
     /**
      * RunMetrics 파싱 - AWS Step Functions TaskSucceeded output 구조
-     * Payload는 String 또는 Map 둘 다 가능 → 둘 다 처리
+     * taskOutput이 이미 outputMap (ExecutedVersion, Payload, StatusCode...)
      * taskOutput = raw JSON string from AWS SDK
      */
     private void parseRunMetrics(String taskOutput, Map<String, Object> context) {
         try {
-            // 1️⃣ 1차 언래핑
-            Map<String, Object> outer = objectMapper.readValue(taskOutput, Map.class);
+            // 🔥 taskOutput 최상단 = outputMap (ExecutedVersion, Payload...)
+            Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
 
-            // 2️⃣ Step Functions Output wrapper (String 또는 Map)
-            Object outputObj = outer.get("output");
-            if (outputObj == null) {
-                log.warn("❌ [RunMetrics] output=null - RunMetrics 파싱 불가");
-                return;
-            }
+            log.info("📤 [RunMetrics-OutputMap] {}", outputMap.keySet());
 
-            // outputObj는 Map 또는 JSON String일 수 있음 → 둘 다 처리
-            Map<String, Object> outputMap;
-            if (outputObj instanceof String) {
-                outputMap = objectMapper.readValue((String) outputObj, Map.class);
-            } else {
-                outputMap = (Map<String, Object>) outputObj;
-            }
-
-            // 3️⃣ Payload 추출 (Map 또는 String 둘 다 처리)
+            // 1️⃣ Payload 추출 (String 또는 Map 둘 다 처리)
             Object payloadObj = outputMap.get("Payload");
             if (payloadObj == null) {
                 log.warn("❌ [RunMetrics] Payload=null - RunMetrics 파싱 불가");
@@ -653,16 +640,16 @@ public class StepFunctionsPollingService {
 
             log.info("📥 [RunMetrics-Payload] {}", objectMapper.writeValueAsString(payload));
 
-            // 4️⃣ blue/green
+            // 2️⃣ blue/green
             Map<String, Object> blue = (Map<String, Object>) payload.get("blue");
             Map<String, Object> green = (Map<String, Object>) payload.get("green");
 
             if (blue == null || green == null) {
-                log.warn("❌ [RunMetrics] blue 또는 green 없음");
+                log.warn("❌ [RunMetrics] blue/green 없음");
                 return;
             }
 
-            // 5️⃣ 저장
+            // 3️⃣ 저장
             context.put("blueLatencyMs", blue.get("latencyMs"));
             context.put("greenLatencyMs", green.get("latencyMs"));
             context.put("blueErrorRate", blue.get("errorRate"));
@@ -678,10 +665,10 @@ public class StepFunctionsPollingService {
                 context.put("latencyImprovement", comparison.get("latencyImprovement"));
             }
 
-            log.info("✅ [RunMetrics-Final] blueLatency={}, greenLatency={}, blueError={}, greenError={}, blueUrl={}, greenUrl={}",
-                context.get("blueLatencyMs"), context.get("greenLatencyMs"),
-                context.get("blueErrorRate"), context.get("greenErrorRate"),
-                context.get("blueUrl"), context.get("greenUrl"));
+            log.info("✅ [RunMetrics-Final] blueLatency={}, greenLatency={}",
+                context.get("blueLatencyMs"),
+                context.get("greenLatencyMs")
+            );
 
         } catch (Exception e) {
             log.error("❌ [RunMetrics-Parse-Error] {}", e.getMessage(), e);
