@@ -423,19 +423,11 @@ public class StepFunctionsPollingService {
      */
     private String extractStateNameFromTaskEvent(HistoryEvent event) {
         try {
-            // HistoryEvent를 JSON으로 변환
-            String eventJson = objectMapper.writeValueAsString(event);
-            Map<String, Object> eventMap = objectMapper.readValue(eventJson, Map.class);
+            // AWS SDK의 getter 메서드로 직접 접근
+            var details = event.stateEnteredEventDetails();
 
-            // stateEnteredEventDetails에서 name 추출
-            if (eventMap.containsKey("stateEnteredEventDetails")) {
-                Object details = eventMap.get("stateEnteredEventDetails");
-                if (details instanceof Map) {
-                    Map<String, Object> detailsMap = (Map<String, Object>) details;
-                    if (detailsMap.containsKey("name")) {
-                        return (String) detailsMap.get("name");
-                    }
-                }
+            if (details != null && details.name() != null) {
+                return details.name();
             }
 
             // 폴백: 기존 방식으로도 시도 (호환성)
