@@ -1129,27 +1129,36 @@ public class StepFunctionsPollingService {
 
             // ✅ 정렬된 이벤트를 순서대로 탐색
             for (HistoryEvent event : sortedEvents) {
-                // 🔥🔥 RunMetrics는 ID 필터링 완전 우회 - 가장 먼저 처리
+                // 🔥🔥 RunMetrics는 TaskSucceeded 이벤트에 들어있으므로 먼저 확인
+                if ("TaskSucceeded".equals(event.typeAsString())) {
+                    var succeeded = event.taskSucceededEventDetails();
+                    if (succeeded != null && succeeded.output() != null) {
+                        String out = succeeded.output();
+                        try {
+                            // output 내부에 blue/green 있으면 RunMetrics로 간주
+                            if (out.contains("\"blue\"") && out.contains("\"green\"")) {
+                                log.info("🔥 [RunMetrics-Detected] TaskSucceeded에서 RunMetrics 발견! eventId={}", event.id());
+                                Map<String, Object> metricsContext = new HashMap<>();
+                                parseRunMetrics(out, metricsContext);
+                                context.putAll(metricsContext);  // ← monitoringContext에 merge
+                                runMetricsDetected = true;  // 🔥 RunMetrics 감지 플래그
+                                log.info("✅ [RunMetrics-Parsed] RunMetrics 파싱 성공! blueLatency: {}, greenLatency: {}, blueError: {}, greenError: {}",
+                                    metricsContext.get("blueLatencyMs"), metricsContext.get("greenLatencyMs"),
+                                    metricsContext.get("blueErrorRate"), metricsContext.get("greenErrorRate"));
+                                maxEventId = Math.max(maxEventId, event.id());
+                                continue;
+                            }
+                        } catch (Exception e) {
+                            log.warn("Failed to parse RunMetrics from TaskSucceeded, skipping", e);
+                            continue;
+                        }
+                    }
+                }
+
+                // 🔥🔥 TaskStateExited에서 CheckDeployment 처리
                 var stateExitedDetails = event.stateExitedEventDetails();
                 String taskName = stateExitedDetails != null ? stateExitedDetails.name() : null;
                 String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
-
-                if ("RunMetrics".equals(taskName) && taskOutput != null && !taskOutput.isEmpty()) {
-                    try {
-                        Map<String, Object> metricsContext = new HashMap<>();
-                        parseRunMetrics(taskOutput, metricsContext);  // 🔥 String을 직접 전달
-                        context.putAll(metricsContext);  // ← monitoringContext에 merge
-                        runMetricsDetected = true;  // 🔥 RunMetrics 감지 플래그
-                        log.info("✅ [RunMetrics-Parsed-Priority] RunMetrics 우선 파싱 성공! blueLatency: {}, greenLatency: {}, blueError: {}, greenError: {}",
-                            metricsContext.get("blueLatencyMs"), metricsContext.get("greenLatencyMs"),
-                            metricsContext.get("blueErrorRate"), metricsContext.get("greenErrorRate"));
-                        maxEventId = Math.max(maxEventId, event.id());  // 🔥 처리 후 ID 업데이트
-                        continue;  // ← 다른 처리 스킵, 다음 event로
-                    } catch (Exception e) {
-                        log.warn("Failed to parse RunMetrics with priority, skipping", e);
-                        continue;
-                    }
-                }
 
                 // 🔥🔥 CheckDeployment 우선 처리 (ID 필터링 완전 우회)
                 if ("CheckDeployment".equals(taskName) && taskOutput != null && !taskOutput.isEmpty()) {
