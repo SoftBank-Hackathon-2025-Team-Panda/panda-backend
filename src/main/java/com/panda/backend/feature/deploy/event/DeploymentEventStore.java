@@ -18,6 +18,9 @@ public class DeploymentEventStore {
     // deploymentId -> List of events (히스토리)
     private final Map<String, Queue<DeploymentEvent>> eventHistoryMap = new ConcurrentHashMap<>();
 
+    // deploymentId -> keepalive thread (주기적 connected 이벤트 전송 스레드)
+    private final Map<String, Thread> keepaliveThreadMap = new ConcurrentHashMap<>();
+
     // 새로운 SSE 클라이언트 연결 등록
     public SseEmitter registerEmitter(String deploymentId) {
 
@@ -107,6 +110,9 @@ public class DeploymentEventStore {
 
     // "deployment ready" 상태 전송 (배포 준비 완료, 수동 전환 대기)
     public void sendDeploymentReadyEvent(String deploymentId, Map<String, Object> details) {
+        // ✅ Deployment ready 이벤트 전에 connected 이벤트 먼저 전송
+        sendConnectedEvent(deploymentId);
+
         DeploymentEvent event = new DeploymentEvent();
         event.setType("stage");
         event.setMessage("[Stage 4] Green 서비스 배포 완료 - 트래픽 전환 대기 중");
@@ -190,5 +196,30 @@ public class DeploymentEventStore {
         }
     }
 
+    // Connected 이벤트 전송 (stage 이벤트 직전에 연결 상태 확인)
+    public void sendConnectedEvent(String deploymentId) {
+        List<SseEmitter> emitters = emitterMap.get(deploymentId);
+        if (emitters != null && !emitters.isEmpty()) {
+            List<SseEmitter> failedEmitters = new ArrayList<>();
+
+            for (SseEmitter emitter : emitters) {
+                try {
+                    emitter.send(SseEmitter.event()
+                            .id(UUID.randomUUID().toString())
+                            .name("connected")
+                            .reconnectTime(5000)
+                            .data(Map.of("message", "SSE connection active")));
+                } catch (IOException e) {
+                    log.warn("Failed to send connected event to emitter for deployment: {}", deploymentId, e);
+                    failedEmitters.add(emitter);
+                }
+            }
+
+            // 실패한 emitter 제거
+            for (SseEmitter failedEmitter : failedEmitters) {
+                removeEmitter(deploymentId, failedEmitter);
+            }
+        }
+    }
 
 }

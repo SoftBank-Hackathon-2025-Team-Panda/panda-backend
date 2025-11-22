@@ -21,6 +21,9 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
     @Override
     public void publishStageEvent(String deploymentId, Integer stage, String message, Map<String, Object> details) {
         try {
+            // ✅ Stage 이벤트 전에 connected 이벤트 먼저 전송
+            deploymentEventStore.sendConnectedEvent(deploymentId);
+
             // 이벤트 생성 및 발행
             DeploymentEvent event = new DeploymentEvent();
             event.setType("stage");
@@ -92,6 +95,9 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
     @Override
     public void publishStepFunctionsProgress(String deploymentId, String stepFunctionsStage) {
         try {
+            // ✅ Step Functions 진행상황 이벤트 전에 connected 이벤트 먼저 전송
+            deploymentEventStore.sendConnectedEvent(deploymentId);
+
             String message = mapStepFunctionsStageToMessage(stepFunctionsStage);
             Integer stageNumber = mapStepFunctionsStageToNumber(stepFunctionsStage);
 
