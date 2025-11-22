@@ -613,38 +613,27 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * RunMetrics 파싱 - AWS Step Functions TaskStateExited output 구조
-     * 3단계 언래핑: Step Functions wrapper → Lambda response → Payload metrics
+     * RunMetrics 파싱 - AWS Step Functions TaskSucceeded output 구조 (2단계만)
+     * TaskSucceeded.output = Step Functions wrapper { output: { Payload: {...} } }
      * taskOutput = raw JSON string from AWS SDK
      */
     private void parseRunMetrics(String taskOutput, Map<String, Object> context) {
         try {
-            // 1️⃣ Step Functions의 TaskStateExited.output 언래핑
+            // 1️⃣ JSON 파싱
             Map<String, Object> outer = objectMapper.readValue(taskOutput, Map.class);
-            Object outputObj = outer.get("output");
-            if (outputObj == null) {
-                log.warn("❌ [RunMetrics] output=null - RunMetrics 파싱 불가");
+
+            // 2️⃣ Step Functions output wrapper 언래핑
+            Map<String, Object> outputWrapper = (Map<String, Object>) outer.get("output");
+            if (outputWrapper == null) {
+                log.warn("❌ [RunMetrics] output wrapper=null - RunMetrics 파싱 불가");
                 return;
             }
 
-            // 2️⃣ Lambda Invoke Response 언래핑 (String 가능성)
-            if (outputObj instanceof String) {
-                outputObj = objectMapper.readValue((String) outputObj, Map.class);
-            }
-            Map<String, Object> lambda = (Map<String, Object>) outputObj;
-
-            // 3️⃣ 진짜 Payload 추출
-            Object payloadObj = lambda.get("Payload");
-            if (payloadObj == null) {
-                log.warn("❌ [RunMetrics] lambda.Payload=null - RunMetrics 파싱 불가");
+            // 3️⃣ Payload (진짜 RunMetrics 데이터)
+            Map<String, Object> payload = (Map<String, Object>) outputWrapper.get("Payload");
+            if (payload == null) {
+                log.warn("❌ [RunMetrics] Payload=null - RunMetrics 파싱 불가");
                 return;
-            }
-
-            Map<String, Object> payload;
-            if (payloadObj instanceof String) {
-                payload = objectMapper.readValue((String) payloadObj, Map.class);
-            } else {
-                payload = (Map<String, Object>) payloadObj;
             }
 
             log.info("📥 [RunMetrics-Payload] 파싱된 Payload: {}", objectMapper.writeValueAsString(payload));
