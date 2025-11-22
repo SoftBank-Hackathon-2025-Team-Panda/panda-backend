@@ -613,44 +613,76 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * RunMetrics 파싱 - Lambda Invoke 결과 구조
-     * outputMap.output.Payload.{blue, green}
+     * RunMetrics 파싱 - AWS Step Functions TaskStateExited output 구조
+     * 3단계 언래핑: Step Functions wrapper → Lambda response → Payload metrics
+     * taskOutput = raw JSON string from AWS SDK
      */
-    private void parseRunMetrics(Map<String, Object> outputMap, Map<String, Object> context) {
-
+    private void parseRunMetrics(String taskOutput, Map<String, Object> context) {
         try {
-            // output (Lambda Invoke Result Wrapper)
-            Map<String, Object> output = (Map<String, Object>) outputMap.get("output");
-            if (output == null) return;
+            // 1️⃣ Step Functions의 TaskStateExited.output 언래핑
+            Map<String, Object> outer = objectMapper.readValue(taskOutput, Map.class);
+            Object outputObj = outer.get("output");
+            if (outputObj == null) {
+                log.warn("❌ [RunMetrics] output=null - RunMetrics 파싱 불가");
+                return;
+            }
 
-            // Payload (실제 데이터)
-            Map<String, Object> payload = (Map<String, Object>) output.get("Payload");
-            if (payload == null) return;
+            // 2️⃣ Lambda Invoke Response 언래핑 (String 가능성)
+            if (outputObj instanceof String) {
+                outputObj = objectMapper.readValue((String) outputObj, Map.class);
+            }
+            Map<String, Object> lambda = (Map<String, Object>) outputObj;
 
-            // BLUE metrics
+            // 3️⃣ 진짜 Payload 추출
+            Object payloadObj = lambda.get("Payload");
+            if (payloadObj == null) {
+                log.warn("❌ [RunMetrics] lambda.Payload=null - RunMetrics 파싱 불가");
+                return;
+            }
+
+            Map<String, Object> payload;
+            if (payloadObj instanceof String) {
+                payload = objectMapper.readValue((String) payloadObj, Map.class);
+            } else {
+                payload = (Map<String, Object>) payloadObj;
+            }
+
+            log.info("📥 [RunMetrics-Payload] 파싱된 Payload: {}", objectMapper.writeValueAsString(payload));
+
+            // 4️⃣ blue/green 파싱
             Map<String, Object> blue = (Map<String, Object>) payload.get("blue");
-            if (blue != null) {
-                context.put("blueUrl", blue.get("url"));
-                context.put("blueLatencyMs", blue.get("latencyMs"));
-                context.put("blueErrorRate", blue.get("errorRate"));
-                context.put("blueTargetGroupArn", blue.get("targetGroupArn"));
-                log.info("📊 [RunMetrics-Parsed] blue: url={}, latency={}, errorRate={}, arn={}",
-                    blue.get("url"), blue.get("latencyMs"), blue.get("errorRate"), blue.get("targetGroupArn"));
+            Map<String, Object> green = (Map<String, Object>) payload.get("green");
+
+            if (blue == null || green == null) {
+                log.warn("❌ [RunMetrics] blue 또는 green 데이터 없음");
+                return;
             }
 
-            // GREEN metrics
-            Map<String, Object> green = (Map<String, Object>) payload.get("green");
-            if (green != null) {
-                context.put("greenUrl", green.get("url"));
-                context.put("greenLatencyMs", green.get("latencyMs"));
-                context.put("greenErrorRate", green.get("errorRate"));
-                context.put("greenTargetGroupArn", green.get("targetGroupArn"));
-                log.info("📊 [RunMetrics-Parsed] green: url={}, latency={}, errorRate={}, arn={}",
-                    green.get("url"), green.get("latencyMs"), green.get("errorRate"), green.get("targetGroupArn"));
+            // 5️⃣ context 저장
+            context.put("blueLatencyMs", blue.get("latencyMs"));
+            context.put("greenLatencyMs", green.get("latencyMs"));
+            context.put("blueErrorRate", blue.get("errorRate"));
+            context.put("greenErrorRate", green.get("errorRate"));
+
+            context.put("blueUrl", blue.get("url"));
+            context.put("greenUrl", green.get("url"));
+
+            context.put("blueTargetGroupArn", blue.get("targetGroupArn"));
+            context.put("greenTargetGroupArn", green.get("targetGroupArn"));
+
+            Map<String, Object> comparison = (Map<String, Object>) payload.get("comparison");
+            if (comparison != null) {
+                context.put("fasterService", comparison.get("fasterService"));
+                context.put("latencyImprovement", comparison.get("latencyImprovement"));
             }
+
+            log.info("✅ [RunMetrics-Final] 파싱 완료 - blueLatency: {}, greenLatency: {}, blueError: {}, greenError: {}, blueUrl: {}, greenUrl: {}",
+                context.get("blueLatencyMs"), context.get("greenLatencyMs"),
+                context.get("blueErrorRate"), context.get("greenErrorRate"),
+                context.get("blueUrl"), context.get("greenUrl"));
 
         } catch (Exception e) {
-            log.error("❌ Failed to parse RunMetrics output", e);
+            log.error("❌ [RunMetrics-Parse-Error] {}", e.getMessage(), e);
         }
     }
 
@@ -1104,9 +1136,8 @@ public class StepFunctionsPollingService {
 
                 if ("RunMetrics".equals(taskName) && taskOutput != null && !taskOutput.isEmpty()) {
                     try {
-                        Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
                         Map<String, Object> metricsContext = new HashMap<>();
-                        parseRunMetrics(outputMap, metricsContext);
+                        parseRunMetrics(taskOutput, metricsContext);  // 🔥 String을 직접 전달
                         context.putAll(metricsContext);  // ← monitoringContext에 merge
                         runMetricsDetected = true;  // 🔥 RunMetrics 감지 플래그
                         log.info("✅ [RunMetrics-Parsed-Priority] RunMetrics 우선 파싱 성공! blueLatency: {}, greenLatency: {}, blueError: {}, greenError: {}",
