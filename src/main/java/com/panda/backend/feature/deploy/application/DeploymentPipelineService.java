@@ -91,9 +91,9 @@ public class DeploymentPipelineService {
 
             // ✅ Step Functions 폴링 시작 (비동기)
             // ExecutionArn은 Step Functions 내부의 Lambda가 Secrets Manager에 저장할 때까지 기다렸다가 조회
-            stepFunctionsPollingService.startPollingAsync(deploymentId);
+            stepFunctionsPollingService.startPollingAsync(deploymentId, owner, repo);
 
-            log.info("Step Functions polling started for deploymentId: {}", deploymentId);
+            log.info("Step Functions polling started for deploymentId: {}, owner: {}, repo: {}", deploymentId, owner, repo);
 
             // NOTE: 폴링은 별도 스레드에서 실행되므로 여기서는 바로 반환
             // - ExecutionHistory 감시

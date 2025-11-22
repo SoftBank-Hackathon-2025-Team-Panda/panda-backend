@@ -51,11 +51,13 @@ public class StepFunctionsPollingService {
      * ECR 푸시 완료 직후 호출되어야 함
      *
      * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
      */
-    public void startPollingAsync(String deploymentId) {
+    public void startPollingAsync(String deploymentId, String owner, String repo) {
         executorService.submit(() -> {
             try {
-                pollExecutionHistory(deploymentId);
+                pollExecutionHistory(deploymentId, owner, repo);
             } catch (Exception e) {
                 log.error("Polling failed for deploymentId: {}", deploymentId, e);
                 eventPublisher.publishErrorEvent(deploymentId,
@@ -63,35 +65,53 @@ public class StepFunctionsPollingService {
             }
         });
 
-        log.info("Step Functions polling started asynchronously for deploymentId: {}", deploymentId);
+        log.info("Step Functions polling started asynchronously for deploymentId: {} ({}/{})", deploymentId, owner, repo);
     }
 
     /**
      * ExecutionHistory를 폴링하여 상태 변화 감지
      *
      * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
      */
-    private void pollExecutionHistory(String deploymentId) {
+    private void pollExecutionHistory(String deploymentId, String owner, String repo) {
         long pollingStartTime = System.currentTimeMillis();
         String executionArn = null;
         String previousStage = null;
         int pollCount = 0;
+        String secretName = "panda/stepfunctions/" + owner + "-" + repo + "-dockerfile-latest-execution";
 
         try {
             // Step 1: Secrets Manager에서 ExecutionArn 조회
-            log.debug("Waiting {}ms for ExecutionArn to be saved in Secrets Manager...", waitForExecutionArnMs);
+            log.info("⏳ [POLLING-START] deploymentId: {}, owner: {}, repo: {} - Waiting {}ms for ExecutionArn to be saved in Secrets Manager...",
+                deploymentId, owner, repo, waitForExecutionArnMs);
+            log.info("   Expected Secret Name: {}", secretName);
             Thread.sleep(waitForExecutionArnMs);
 
-            executionArn = executionArnStore.get(deploymentId);
+            log.info("🔍 [SECRETS-MANAGER-LOOKUP] deploymentId: {} - Attempting to retrieve ExecutionArn...", deploymentId);
+            executionArn = executionArnStore.get(owner, repo);
 
             if (executionArn == null) {
                 String errorMsg = "ExecutionArn not found in Secrets Manager after waiting";
-                log.error(errorMsg);
+                log.error("❌ [POLLING-FAILED] deploymentId: {}, owner: {}, repo: {} - {} (Secret may not have been created)",
+                    deploymentId, owner, repo, errorMsg);
+                log.error("   This means:");
+                log.error("   1. EventBridge 규칙이 트리거되지 않음");
+                log.error("   2. Step Functions이 실행되지 않음");
+                log.error("   3. Lambda 함수가 ExecutionArn을 저장하지 않음");
+                log.error("   ➜ AWS Console에서 다음을 확인하세요:");
+                log.error("     - EventBridge 규칙: softbank-ecr-trigger-{}-{}", owner, repo);
+                log.error("     - Secrets Manager Secret: {}", secretName);
+                log.error("     - Step Functions: 실행 이력");
+                log.error("     - Lambda: lambda_0_register_to_eventbus 로그");
                 eventPublisher.publishErrorEvent(deploymentId, errorMsg);
                 return;
             }
 
-            log.info("ExecutionArn retrieved: {}, starting polling...", executionArn);
+            log.info("✅ [EXECUTION-ARN-FOUND] deploymentId: {}, owner: {}, repo: {} - ExecutionArn: {}",
+                deploymentId, owner, repo, executionArn);
+            log.info("🚀 [POLLING-STARTED] deploymentId: {} - Starting Step Functions history polling...", deploymentId);
 
             // Step 2: ExecutionHistory 폴링 (최대 30분)
             while (System.currentTimeMillis() - pollingStartTime < maxPollingDurationMs) {
@@ -147,9 +167,10 @@ public class StepFunctionsPollingService {
             // 배포 완료 후 Secrets Manager에서 정리
             if (executionArn != null) {
                 try {
-                    executionArnStore.remove(deploymentId);
+                    executionArnStore.remove(owner, repo);
                 } catch (Exception e) {
-                    log.warn("Failed to clean up ExecutionArn for deploymentId: {}", deploymentId, e);
+                    log.warn("Failed to clean up ExecutionArn for deploymentId: {}, owner: {}, repo: {}",
+                        deploymentId, owner, repo, e);
                 }
             }
         }

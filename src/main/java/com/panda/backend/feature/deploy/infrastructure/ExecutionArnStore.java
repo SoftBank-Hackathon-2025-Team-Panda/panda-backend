@@ -22,19 +22,20 @@ public class ExecutionArnStore {
 
     private final SecretsManagerClient secretsManagerClient;
 
-    @Value("${aws.secrets-manager.execution-arn-prefix:panda/deployment/}")
+    @Value("${aws.secrets-manager.execution-arn-prefix:panda/stepfunctions/}")
     private String secretPrefix;
 
     /**
      * ExecutionArn을 Secrets Manager에 저장
      * (Step Functions 내부의 Lambda에서 호출됨)
      *
-     * @param deploymentId 배포 ID (사용자 백엔드에서 생성)
+     * @param owner GitHub owner
+     * @param repo GitHub repo
      * @param executionArn Step Functions Execution ARN
      */
-    public void save(String deploymentId, String executionArn) {
+    public void save(String owner, String repo, String executionArn) {
         try {
-            String secretName = secretPrefix + deploymentId;
+            String secretName = secretPrefix + owner + "-" + repo + "-dockerfile-latest-execution";
 
             PutSecretValueRequest request = PutSecretValueRequest.builder()
                 .secretId(secretName)
@@ -47,8 +48,8 @@ public class ExecutionArnStore {
                 secretName, executionArn);
 
         } catch (Exception e) {
-            log.error("Failed to save ExecutionArn to Secrets Manager for deploymentId: {}",
-                deploymentId, e);
+            log.error("Failed to save ExecutionArn to Secrets Manager for owner: {}, repo: {}",
+                owner, repo, e);
             throw new RuntimeException("Failed to save ExecutionArn: " + e.getMessage(), e);
         }
     }
@@ -57,12 +58,13 @@ public class ExecutionArnStore {
      * Secrets Manager에서 ExecutionArn 조회
      * (백엔드의 폴링 서비스에서 호출됨)
      *
-     * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
      * @return ExecutionArn (없으면 null)
      */
-    public String get(String deploymentId) {
+    public String get(String owner, String repo) {
         try {
-            String secretName = secretPrefix + deploymentId;
+            String secretName = secretPrefix + owner + "-" + repo + "-dockerfile-latest-execution";
 
             GetSecretValueRequest request = GetSecretValueRequest.builder()
                 .secretId(secretName)
@@ -75,11 +77,11 @@ public class ExecutionArnStore {
             return response.secretString();
 
         } catch (ResourceNotFoundException e) {
-            log.debug("ExecutionArn not found in Secrets Manager - deploymentId: {}", deploymentId);
+            log.debug("ExecutionArn not found in Secrets Manager - owner: {}, repo: {}", owner, repo);
             return null;
         } catch (Exception e) {
-            log.error("Failed to get ExecutionArn from Secrets Manager for deploymentId: {}",
-                deploymentId, e);
+            log.error("Failed to get ExecutionArn from Secrets Manager for owner: {}, repo: {}",
+                owner, repo, e);
             throw new RuntimeException("Failed to get ExecutionArn: " + e.getMessage(), e);
         }
     }
@@ -88,11 +90,12 @@ public class ExecutionArnStore {
      * Secrets Manager에서 ExecutionArn 삭제
      * (배포 완료 후 호출되어 정리함)
      *
-     * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
      */
-    public void remove(String deploymentId) {
+    public void remove(String owner, String repo) {
         try {
-            String secretName = secretPrefix + deploymentId;
+            String secretName = secretPrefix + owner + "-" + repo + "-dockerfile-latest-execution";
 
             DeleteSecretRequest request = DeleteSecretRequest.builder()
                 .secretId(secretName)
@@ -104,10 +107,10 @@ public class ExecutionArnStore {
             log.info("ExecutionArn deleted from Secrets Manager - secretName: {}", secretName);
 
         } catch (ResourceNotFoundException e) {
-            log.debug("ExecutionArn already deleted or not found - deploymentId: {}", deploymentId);
+            log.debug("ExecutionArn already deleted or not found - owner: {}, repo: {}", owner, repo);
         } catch (Exception e) {
-            log.warn("Failed to delete ExecutionArn from Secrets Manager for deploymentId: {}, error: {}",
-                deploymentId, e.getMessage());
+            log.warn("Failed to delete ExecutionArn from Secrets Manager for owner: {}, repo: {}, error: {}",
+                owner, repo, e.getMessage());
             // 삭제 실패는 치명적이지 않으므로 exception 던지지 않음
         }
     }
@@ -115,10 +118,11 @@ public class ExecutionArnStore {
     /**
      * Secrets Manager에 ExecutionArn이 존재하는지 확인
      *
-     * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
      * @return 존재하면 true, 없으면 false
      */
-    public boolean exists(String deploymentId) {
-        return get(deploymentId) != null;
+    public boolean exists(String owner, String repo) {
+        return get(owner, repo) != null;
     }
 }
