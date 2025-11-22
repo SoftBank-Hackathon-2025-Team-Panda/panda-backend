@@ -591,34 +591,32 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * CheckDeployment 파싱 정답 코드
+     * CheckDeployment 파싱 - 실제 JSON 구조 기준
+     * outputMap.checkResult.{deploymentId, blueTargetGroupArn, greenTargetGroupArn}
      */
     private void parseCheckDeployment(Map<String, Object> outputMap, Map<String, Object> context) {
 
         try {
-            // outputMap.checkResult.Payload.checkResult
-            Map<String, Object> checkWrapper = (Map<String, Object>) outputMap.get("checkResult");
-            if (checkWrapper == null) return;
-
-            Map<String, Object> payload = (Map<String, Object>) checkWrapper.get("Payload");
-            if (payload == null) return;
-
-            Map<String, Object> checkResult = (Map<String, Object>) payload.get("checkResult");
+            // checkResult (1뎁스만 있음)
+            Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
             if (checkResult == null) return;
 
             // CodeDeploy DeploymentId
             if (checkResult.get("deploymentId") != null) {
                 context.put("codeDeployDeploymentId", checkResult.get("deploymentId"));
+                log.info("📌 [CheckDeployment-Parsed] deploymentId={}", checkResult.get("deploymentId"));
             }
 
             // Blue TargetGroup
             if (checkResult.get("blueTargetGroupArn") != null) {
                 context.put("blueTargetGroupArn", checkResult.get("blueTargetGroupArn"));
+                log.info("📌 [CheckDeployment-Parsed] blueTargetGroupArn={}", checkResult.get("blueTargetGroupArn"));
             }
 
             // Green TargetGroup
             if (checkResult.get("greenTargetGroupArn") != null) {
                 context.put("greenTargetGroupArn", checkResult.get("greenTargetGroupArn"));
+                log.info("📌 [CheckDeployment-Parsed] greenTargetGroupArn={}", checkResult.get("greenTargetGroupArn"));
             }
 
         } catch (Exception e) {
@@ -627,16 +625,18 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * RunMetrics 파싱 정답 코드
+     * RunMetrics 파싱 - Lambda Invoke 결과 구조
+     * outputMap.output.Payload.{blue, green}
      */
     private void parseRunMetrics(Map<String, Object> outputMap, Map<String, Object> context) {
 
         try {
-            // outputMap.metricsResult.Payload.blue/green
-            Map<String, Object> metricsResult = (Map<String, Object>) outputMap.get("metricsResult");
-            if (metricsResult == null) return;
+            // output (Lambda Invoke Result Wrapper)
+            Map<String, Object> output = (Map<String, Object>) outputMap.get("output");
+            if (output == null) return;
 
-            Map<String, Object> payload = (Map<String, Object>) metricsResult.get("Payload");
+            // Payload (실제 데이터)
+            Map<String, Object> payload = (Map<String, Object>) output.get("Payload");
             if (payload == null) return;
 
             // BLUE metrics
@@ -645,6 +645,9 @@ public class StepFunctionsPollingService {
                 context.put("blueUrl", blue.get("url"));
                 context.put("blueLatencyMs", blue.get("latencyMs"));
                 context.put("blueErrorRate", blue.get("errorRate"));
+                context.put("blueTargetGroupArn", blue.get("targetGroupArn"));
+                log.info("📊 [RunMetrics-Parsed] blue: url={}, latency={}, errorRate={}, arn={}",
+                    blue.get("url"), blue.get("latencyMs"), blue.get("errorRate"), blue.get("targetGroupArn"));
             }
 
             // GREEN metrics
@@ -653,6 +656,9 @@ public class StepFunctionsPollingService {
                 context.put("greenUrl", green.get("url"));
                 context.put("greenLatencyMs", green.get("latencyMs"));
                 context.put("greenErrorRate", green.get("errorRate"));
+                context.put("greenTargetGroupArn", green.get("targetGroupArn"));
+                log.info("📊 [RunMetrics-Parsed] green: url={}, latency={}, errorRate={}, arn={}",
+                    green.get("url"), green.get("latencyMs"), green.get("errorRate"), green.get("targetGroupArn"));
             }
 
         } catch (Exception e) {
