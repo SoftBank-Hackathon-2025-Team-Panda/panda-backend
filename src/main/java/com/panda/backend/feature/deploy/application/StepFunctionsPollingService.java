@@ -939,17 +939,20 @@ public class StepFunctionsPollingService {
 
                 // TaskStateExited 이벤트 (Task 완료) - awsConnection 전달
                 if (event.typeAsString() != null && event.typeAsString().equals("TaskStateExited")) {
-                    // TaskStateExited에서 output 파싱하여 로깅
+                    // ✅ Event 전체 구조 로깅 (output 파악용)
                     try {
-                        String eventString = event.toString();
-                        String taskOutput = extractFieldFromEventString(eventString, "output");
-                        if (taskOutput != null && !taskOutput.isEmpty()) {
-                            log.info("📤 [Event-Detail] TaskStateExited - eventId: {}, timestamp: {}, output: {}",
-                                event.id(), eventTimestamp,
-                                taskOutput.length() > 500 ? taskOutput.substring(0, 500) + "..." : taskOutput);
+                        String fullEventString = event.toString();
+                        // output 필드 있는지 확인
+                        if (fullEventString.contains("output")) {
+                            log.info("📤 [Event-Detail] TaskStateExited FULL - eventId: {}, event: {}",
+                                event.id(),
+                                fullEventString.length() > 800 ? fullEventString.substring(0, 800) + "..." : fullEventString);
+                        } else {
+                            log.info("📤 [Event-Detail] TaskStateExited - eventId: {}, timestamp: {}, (output field not found in event)",
+                                event.id(), eventTimestamp);
                         }
                     } catch (Exception e) {
-                        log.debug("Failed to extract output from TaskStateExited", e);
+                        log.debug("Failed to log TaskStateExited details", e);
                     }
 
                     String stage = analyzeTaskStateExited(deploymentId, event, awsConnection);
