@@ -1,8 +1,11 @@
 package com.panda.backend.feature.deploy.api;
 
 import com.panda.backend.feature.deploy.application.GetDeploymentResultService;
+import com.panda.backend.feature.deploy.application.LambdaInvocationService;
 import com.panda.backend.feature.deploy.application.StartDeploymentService;
 import com.panda.backend.feature.deploy.application.StreamDeploymentEventsService;
+import com.panda.backend.feature.deploy.dto.ApproveDeploymentRequest;
+import com.panda.backend.feature.deploy.dto.ApproveDeploymentResponse;
 import com.panda.backend.feature.deploy.dto.DeployRequest;
 import com.panda.backend.feature.deploy.dto.DeployResponse;
 import com.panda.backend.feature.deploy.dto.DeploymentResult;
@@ -27,6 +30,7 @@ public class DeployController implements DeployApi {
     private final StartDeploymentService startDeploymentService;
     private final GetDeploymentResultService getDeploymentResultService;
     private final StreamDeploymentEventsService streamDeploymentEventsService;
+    private final LambdaInvocationService lambdaInvocationService;
 
     @Override
     @PostMapping("/api/v1/deploy")
@@ -59,23 +63,45 @@ public class DeployController implements DeployApi {
                 throw new IllegalArgumentException("배포가 준비되지 않았습니다. 현재 상태: " + result.getStatus());
             }
 
+            // AWS 연결 정보 확인
+            if (result.getAwsAccessKeyId() == null || result.getAwsSecretAccessKey() == null) {
+                throw new IllegalArgumentException("AWS 연결 정보가 없습니다. 배포를 다시 시도해주세요.");
+            }
+
+            log.info("🚀 [Traffic Switch] Starting traffic switch for deployment: {}", deploymentId);
+
+            // Lambda 호출: 배포 승인 (트래픽 전환)
+            ApproveDeploymentRequest lambdaRequest = ApproveDeploymentRequest.builder()
+                .deploymentId(deploymentId)
+                .awsAccessKeyId(result.getAwsAccessKeyId())
+                .awsSecretAccessKey(result.getAwsSecretAccessKey())
+                .build();
+
+            log.info("📤 [Lambda Invocation] Invoking lambda_4_appove_deployment with deploymentId: {}", deploymentId);
+            ApproveDeploymentResponse lambdaResponse = lambdaInvocationService.invokeApproveDeploymentLambda(lambdaRequest);
+
+            // Lambda 응답 검증
+            lambdaInvocationService.validateApproveDeploymentResponse(lambdaResponse);
+
             // 배포 상태를 COMPLETED로 변경
             result.setStatus("COMPLETED");
             result.setCompletedAt(java.time.LocalDateTime.now());
-            // 추가적으로 블루/그린 URL, 성능 메트릭 등을 업데이트할 수 있음
+            result.setFinalService(lambdaResponse.getActiveService() != null ?
+                lambdaResponse.getActiveService() : "green");
 
-            // 배포 결과 저장
-            // (DeploymentResultStore는 현재 메모리 저장소이므로, 변경된 result를 다시 저장)
-            // 실제 구현에서는 여기서 finalService를 "green"으로 설정해야 함
-            result.setFinalService("green");
+            log.info("✅ [Traffic Switch Complete] Deployment completed - deploymentId: {}, activeService: {}",
+                deploymentId, result.getFinalService());
 
             return ApiResponse.success("배포 전환이 시작되었습니다.", Map.of(
                     "deploymentId", deploymentId,
-                    "message", "Traffic switching from blue to green in progress",
-                    "activeService", "green"
+                    "message", lambdaResponse.getMessage() != null ?
+                        lambdaResponse.getMessage() : "Traffic switching from blue to green in progress",
+                    "activeService", result.getFinalService(),
+                    "switchStatus", lambdaResponse.getSwitchStatus() != null ?
+                        lambdaResponse.getSwitchStatus() : "IN_PROGRESS"
             ));
         } catch (Exception e) {
-            log.error("Failed to switch traffic for deployment: {}", deploymentId, e);
+            log.error("❌ [Traffic Switch Failed] Failed to switch traffic for deployment: {}", deploymentId, e);
             throw new RuntimeException("배포 전환 실패: " + e.getMessage(), e);
         }
     }

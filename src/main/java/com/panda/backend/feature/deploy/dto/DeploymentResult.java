@@ -42,6 +42,11 @@ public class DeploymentResult {
     // 이벤트 정보
     private Integer eventCount;         // 발행된 이벤트 개수
 
+    // AWS 연결 정보 (Lambda 호출 시 필요)
+    private String awsAccessKeyId;
+    private String awsSecretAccessKey;
+    private String awsSessionToken;
+
     public boolean isSuccessful() {
         return "COMPLETED".equals(status);
     }

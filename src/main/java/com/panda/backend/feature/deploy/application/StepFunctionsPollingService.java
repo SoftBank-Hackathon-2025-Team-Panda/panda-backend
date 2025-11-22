@@ -192,7 +192,7 @@ public class StepFunctionsPollingService {
                         log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
                         // 배포 준비 완료 상태로 저장 (수동 전환 대기)
                         saveDeploymentReadyResult(deploymentId, owner, repo, branch,
-                            monitoringContext, pollingStartTime, eventCount);
+                            monitoringContext, pollingStartTime, eventCount, awsConnection);
 
                         // ✅ SSE 연결 종료 신호: success 이벤트 발행 (프론트가 SSE를 종료하기 위함)
                         deploymentEventStore.sendDoneEvent(deploymentId, "Deployment ready for manual traffic switch");
@@ -1140,10 +1140,11 @@ public class StepFunctionsPollingService {
      * @param monitoringContext 모니터링 컨텍스트 (Blue/Green URL 등)
      * @param startTimeMs 배포 시작 시간 (밀리초)
      * @param eventCount 발행된 이벤트 개수
+     * @param awsConnection AWS 연결 정보
      */
     private void saveDeploymentReadyResult(String deploymentId, String owner, String repo, String branch,
                                           Map<String, Object> monitoringContext,
-                                          long startTimeMs, int eventCount) {
+                                          long startTimeMs, int eventCount, AwsConnection awsConnection) {
         try {
             LocalDateTime startedAt = LocalDateTime.now().minusNanos((System.currentTimeMillis() - startTimeMs) * 1_000_000);
             LocalDateTime completedAt = LocalDateTime.now();
@@ -1176,6 +1177,13 @@ public class StepFunctionsPollingService {
             }
             if (monitoringContext.containsKey("greenServiceArn")) {
                 result.setGreenServiceArn((String) monitoringContext.get("greenServiceArn"));
+            }
+
+            // AWS 연결 정보 저장 (Lambda 호출 시 필요)
+            if (awsConnection != null) {
+                result.setAwsAccessKeyId(awsConnection.getAccessKeyId());
+                result.setAwsSecretAccessKey(awsConnection.getSecretAccessKey());
+                result.setAwsSessionToken(awsConnection.getSessionToken());
             }
 
             deploymentResultStore.save(result);

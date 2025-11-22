@@ -1,6 +1,8 @@
 package com.panda.backend.feature.deploy.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.panda.backend.feature.deploy.dto.ApproveDeploymentRequest;
+import com.panda.backend.feature.deploy.dto.ApproveDeploymentResponse;
 import com.panda.backend.feature.deploy.dto.RegisterEventBusRequest;
 import com.panda.backend.feature.deploy.dto.RegisterEventBusResponse;
 import lombok.RequiredArgsConstructor;
@@ -31,6 +33,9 @@ public class LambdaInvocationService {
 
     @Value("${aws.lambda.register-eventbus-function-name:lambda_0_register_to_eventbus}")
     private String registerEventBusLambdaName;
+
+    @Value("${aws.lambda.approve-deployment-function-name:lambda_4_appove_deployment}")
+    private String approveDeploymentLambdaName;
 
     /**
      * 서비스 계정의 Lambda를 호출하여 Event Bus 권한 설정 요청
@@ -100,6 +105,87 @@ public class LambdaInvocationService {
 
         if (response.isFailure()) {
             String errorMsg = String.format("Event Bus permission registration failed: %s",
+                response.getMessage());
+            log.error(errorMsg);
+            throw new RuntimeException(errorMsg);
+        }
+
+        if (!response.isSuccess()) {
+            String errorMsg = String.format("Unexpected Lambda response status: %s, message: %s",
+                response.getStatus(), response.getMessage());
+            log.error(errorMsg);
+            throw new RuntimeException(errorMsg);
+        }
+    }
+
+    /**
+     * 서비스 계정의 Lambda를 호출하여 배포 승인 (트래픽 전환) 요청
+     *
+     * @param request 배포 승인 요청 (deploymentId, AWS 자격증명)
+     * @return Lambda 호출 응답
+     * @throws RuntimeException Lambda 호출 실패 시
+     */
+    public ApproveDeploymentResponse invokeApproveDeploymentLambda(ApproveDeploymentRequest request) {
+        try {
+            // 요청을 JSON으로 직렬화
+            String payload = objectMapper.writeValueAsString(request);
+
+            log.info("Invoking lambda function: {} for deployment: {}",
+                approveDeploymentLambdaName, request.getDeploymentId());
+            log.debug("Lambda invocation payload: {}", payload);
+
+            // Lambda 호출 요청 생성
+            InvokeRequest invokeRequest = InvokeRequest.builder()
+                .functionName(approveDeploymentLambdaName)
+                .invocationType("RequestResponse")  // 동기 호출 (응답 대기)
+                .payload(SdkBytes.fromString(payload, StandardCharsets.UTF_8))
+                .build();
+
+            // Lambda 호출
+            InvokeResponse invokeResponse = lambdaClient.invoke(invokeRequest);
+
+            // 응답 파싱
+            String responseBody = invokeResponse.payload().asUtf8String();
+
+            log.debug("Lambda response status code: {}", invokeResponse.statusCode());
+            log.debug("Lambda response body: {}", responseBody);
+
+            // JSON 응답을 DTO로 변환
+            ApproveDeploymentResponse response = objectMapper.readValue(
+                responseBody,
+                ApproveDeploymentResponse.class
+            );
+
+            // 상태 확인
+            if (response.isSuccess()) {
+                log.info("Deployment approval succeeded - deploymentId: {}, activeService: {}",
+                    request.getDeploymentId(), response.getActiveService());
+            } else {
+                log.warn("Deployment approval failed - deploymentId: {}, message: {}",
+                    request.getDeploymentId(), response.getMessage());
+            }
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("Failed to invoke lambda function: {}", approveDeploymentLambdaName, e);
+            throw new RuntimeException("Failed to invoke Lambda: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Lambda 호출 응답의 상태를 확인하고 에러이면 예외 발생
+     *
+     * @param response Lambda 호출 응답
+     * @throws RuntimeException 응답 상태가 OK가 아닐 경우
+     */
+    public void validateApproveDeploymentResponse(ApproveDeploymentResponse response) {
+        if (response == null) {
+            throw new RuntimeException("Lambda response is null");
+        }
+
+        if (response.isFailure()) {
+            String errorMsg = String.format("Deployment approval failed: %s",
                 response.getMessage());
             log.error(errorMsg);
             throw new RuntimeException(errorMsg);
