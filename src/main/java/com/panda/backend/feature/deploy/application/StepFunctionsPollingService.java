@@ -486,20 +486,38 @@ public class StepFunctionsPollingService {
      */
     private String analyzeTaskStateExited(String deploymentId, HistoryEvent event, AwsConnection awsConnection) {
         try {
-            String eventString = event.toString();
-            String taskOutput = extractFieldFromEventString(eventString, "output");
-            String taskName = extractFieldFromEventString(eventString, "resource");
+            // ✅ HistoryEvent 전체를 JSON으로 변환해서 output 추출
+            String eventJson = objectMapper.writeValueAsString(event);
+            log.info("📤 [TaskStateExited-EVENT-JSON] Full HistoryEvent JSON: {}",
+                eventJson.length() > 1500 ? eventJson.substring(0, 1500) + "..." : eventJson);
 
-            log.debug("TaskStateExited - taskName: {}, output: {}", taskName,
-                taskOutput != null ? taskOutput.substring(0, Math.min(200, taskOutput.length())) : "null");
+            Map<String, Object> eventMap = objectMapper.readValue(eventJson, Map.class);
+
+            // output을 다양한 경로에서 시도
+            String taskOutput = null;
+
+            // 1번 방법: 최상위 "output" 필드
+            if (eventMap.containsKey("output")) {
+                taskOutput = (String) eventMap.get("output");
+                log.info("📤 [TaskStateExited-Output] Found output at top level");
+            }
+            // 2번 방법: taskStateExitedEventDetails 내부
+            else if (eventMap.containsKey("taskStateExitedEventDetails")) {
+                Map<String, Object> details = (Map<String, Object>) eventMap.get("taskStateExitedEventDetails");
+                if (details != null && details.containsKey("output")) {
+                    taskOutput = (String) details.get("output");
+                    log.info("📤 [TaskStateExited-Output] Found output in taskStateExitedEventDetails");
+                }
+            }
 
             if (taskOutput == null || taskOutput.isEmpty()) {
+                log.debug("TaskStateExited - No output found in any expected location");
                 return null;
             }
 
             Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
             // ✅ 전체 output JSON 로깅
-            log.info("📤 [TaskStateExited-FULL-JSON] taskName: {}, fullOutput: {}", taskName, objectMapper.writeValueAsString(outputMap));
+            log.info("📤 [TaskStateExited-FULL-JSON] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
 
             String stageStatus = (String) outputMap.get("stage");
 
@@ -521,22 +539,44 @@ public class StepFunctionsPollingService {
 
             // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지
             if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
-                Object statusObj = outputMap.get("status");
+                // 📍 경로: output → Payload → status (그리고 checkResult)
+                Object statusObj = null;
+                Map<String, Object> payloadMap = null;
+                Map<String, Object> checkResultSource = null;
 
-                // ✅ Payload 필드가 있는 경우 처리
-                if (statusObj == null && outputMap.containsKey("Payload")) {
-                    Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
-                    if (payload != null) {
-                        statusObj = payload.get("status");
-                        log.info("📤 [CheckDeployment-Payload] Status found in Payload field: {}", statusObj);
-                    }
+                // 1단계: Payload 추출
+                if (outputMap.containsKey("Payload")) {
+                    payloadMap = (Map<String, Object>) outputMap.get("Payload");
+                    log.info("📤 [CheckDeployment-Step1] Payload found in outputMap");
+                } else {
+                    log.info("📤 [CheckDeployment-Step1] No Payload in outputMap, current structure: {}",
+                        objectMapper.writeValueAsString(outputMap));
                 }
 
-                // ✅ CheckDeployment 상태 전체 로깅
-                log.info("📤 [CheckDeployment-Status-Check] statusObj: {}, outputMap: {}",
-                    statusObj, objectMapper.writeValueAsString(outputMap));
+                // 2단계: Payload에서 status 추출
+                if (payloadMap != null && payloadMap.containsKey("status")) {
+                    statusObj = payloadMap.get("status");
+                    log.info("📤 [CheckDeployment-Step2] Status found in Payload: {}", statusObj);
+                }
 
+                // 3단계: Payload에서 checkResult 추출
+                if (payloadMap != null && payloadMap.containsKey("checkResult")) {
+                    checkResultSource = (Map<String, Object>) payloadMap.get("checkResult");
+                    log.info("📤 [CheckDeployment-Step3] CheckResult found in Payload: {}",
+                        objectMapper.writeValueAsString(checkResultSource));
+                }
+
+                // ✅ 최종 상태 확인
+                log.info("📤 [CheckDeployment-Status-Check] statusObj: {}, deploymentStatus: {}, fullOutput: {}",
+                    statusObj,
+                    checkResultSource != null ? checkResultSource.get("deploymentStatus") : "N/A",
+                    objectMapper.writeValueAsString(outputMap));
+
+                // WAITING_APPROVAL 감지
                 if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
+                    String deploymentStatus = checkResultSource != null ? (String) checkResultSource.get("deploymentStatus") : null;
+                    log.info("✅ [CheckDeployment-DETECTED] Status: WAITING_APPROVAL, DeploymentStatus: {}, deploymentId: {}",
+                        deploymentStatus, deploymentId);
                     log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
                     log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
 
@@ -545,17 +585,6 @@ public class StepFunctionsPollingService {
                     String greenUrl = null;
                     String blueServiceArn = null;
                     String greenServiceArn = null;
-
-                    // ✅ checkResult 처리 (Payload 내부 또는 top-level)
-                    Map<String, Object> checkResultSource = null;
-                    if (outputMap.containsKey("checkResult")) {
-                        checkResultSource = (Map<String, Object>) outputMap.get("checkResult");
-                    } else if (outputMap.containsKey("Payload")) {
-                        Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
-                        if (payload != null && payload.containsKey("checkResult")) {
-                            checkResultSource = (Map<String, Object>) payload.get("checkResult");
-                        }
-                    }
 
                     if (checkResultSource != null) {
                         log.info("📤 [CheckDeployment-CheckResult] checkResult details: {}",
@@ -1090,35 +1119,42 @@ public class StepFunctionsPollingService {
 
                                 // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지 및 stage 반환
                                 if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
-                                    Object statusObj = outputMap.get("status");
+                                    // 📍 경로: output → Payload → status (그리고 checkResult)
+                                    Object statusObj = null;
+                                    Map<String, Object> payloadMap = null;
+                                    Map<String, Object> checkResultSource = null;
 
-                                    // ✅ Payload 필드가 있는 경우 처리
-                                    if (statusObj == null && outputMap.containsKey("Payload")) {
-                                        Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
-                                        if (payload != null) {
-                                            statusObj = payload.get("status");
-                                            log.info("📤 [CheckDeployment-Payload] Status found in Payload field: {}", statusObj);
-                                        }
+                                    // 1단계: Payload 추출
+                                    if (outputMap.containsKey("Payload")) {
+                                        payloadMap = (Map<String, Object>) outputMap.get("Payload");
+                                        log.info("📤 [CheckDeployment-Polling-Step1] Payload found in outputMap");
+                                    }
+
+                                    // 2단계: Payload에서 status 추출
+                                    if (payloadMap != null && payloadMap.containsKey("status")) {
+                                        statusObj = payloadMap.get("status");
+                                        log.info("📤 [CheckDeployment-Polling-Step2] Status found in Payload: {}", statusObj);
+                                    }
+
+                                    // 3단계: Payload에서 checkResult 추출
+                                    if (payloadMap != null && payloadMap.containsKey("checkResult")) {
+                                        checkResultSource = (Map<String, Object>) payloadMap.get("checkResult");
+                                        log.info("📤 [CheckDeployment-Polling-Step3] CheckResult found in Payload: {}",
+                                            objectMapper.writeValueAsString(checkResultSource));
                                     }
 
                                     // ✅ 전체 JSON 로깅
-                                    log.info("📤 [CheckDeployment-FULL-JSON] statusObj: {}, fullOutput: {}",
-                                        statusObj, objectMapper.writeValueAsString(outputMap));
+                                    log.info("📤 [CheckDeployment-FULL-JSON] statusObj: {}, deploymentStatus: {}, fullOutput: {}",
+                                        statusObj,
+                                        checkResultSource != null ? checkResultSource.get("deploymentStatus") : "N/A",
+                                        objectMapper.writeValueAsString(outputMap));
 
                                     if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
+                                        String deploymentStatus = checkResultSource != null ? (String) checkResultSource.get("deploymentStatus") : null;
+                                        log.info("✅ [CheckDeployment-DETECTED-POLLING] Status: WAITING_APPROVAL, DeploymentStatus: {}, deploymentId: {}",
+                                            deploymentStatus, deploymentId);
                                         log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
                                         log.info("Deployment ready - extracting Blue/Green info for context");
-
-                                        // ✅ checkResult에서 Target Group ARN 추출 (Payload 내부 또는 top-level)
-                                        Map<String, Object> checkResultSource = null;
-                                        if (outputMap.containsKey("checkResult")) {
-                                            checkResultSource = (Map<String, Object>) outputMap.get("checkResult");
-                                        } else if (outputMap.containsKey("Payload")) {
-                                            Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
-                                            if (payload != null && payload.containsKey("checkResult")) {
-                                                checkResultSource = (Map<String, Object>) payload.get("checkResult");
-                                            }
-                                        }
 
                                         if (checkResultSource != null) {
                                             log.info("📤 [CheckDeployment-CheckResult-Detail] {}",
@@ -1128,10 +1164,6 @@ public class StepFunctionsPollingService {
                                             }
                                             if (checkResultSource.containsKey("greenTargetGroupArn")) {
                                                 context.put("greenServiceArn", checkResultSource.get("greenTargetGroupArn"));
-                                            }
-                                            if (checkResultSource.containsKey("deploymentStatus")) {
-                                                log.info("📤 [CheckDeployment-DeploymentStatus] deploymentStatus: {}",
-                                                    checkResultSource.get("deploymentStatus"));
                                             }
                                         }
 
