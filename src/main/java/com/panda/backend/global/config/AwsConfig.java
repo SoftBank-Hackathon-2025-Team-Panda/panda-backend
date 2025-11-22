@@ -7,6 +7,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.sfn.SfnClient;
 
 @Configuration
 public class AwsConfig {
@@ -47,6 +48,27 @@ public class AwsConfig {
             // IAM Role이 있는 환경 (EC2, ECS, Lambda 등)에서 사용
             return SecretsManagerClient.builder()
                     .region(Region.of(awsRegion))
+                    .build();
+        }
+    }
+
+    /**
+     * Step Functions 클라이언트 Bean (ap-northeast-2 고정)
+     */
+    @Bean
+    public SfnClient sfnClient() {
+        // 무조건 ap-northeast-2 리전으로 설정
+        if (!accessKeyId.isEmpty() && !secretAccessKey.isEmpty()) {
+            return SfnClient.builder()
+                    .region(Region.AP_NORTHEAST_2)
+                    .credentialsProvider(StaticCredentialsProvider.create(
+                            AwsBasicCredentials.create(accessKeyId, secretAccessKey)
+                    ))
+                    .build();
+        } else {
+            // IAM Role이 있는 환경 (EC2, ECS, Lambda 등)에서 사용
+            return SfnClient.builder()
+                    .region(Region.AP_NORTHEAST_2)
                     .build();
         }
     }
