@@ -29,7 +29,7 @@ public class AwsStepFunctionsConfig {
     public SfnClient sfnClient() {
         try {
             SfnClient client = SfnClient.builder()
-                .region(Region.US_EAST_1)  // 기본 region, 필요시 application.yml에서 설정 가능
+                .region(Region.AP_NORTHEAST_2)  // ap-northeast-2로 고정
                 .build();
 
             log.info("AWS Step Functions client initialized");
