@@ -566,16 +566,23 @@ public class StepFunctionsPollingService {
                 log.info("✅ [CheckDeployment-Detected] CheckDeployment Task 완료! - deploymentId: {}", deploymentId);
                 log.info("📤 [CheckDeployment-Output] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
 
-                // ✅ checkResult에서 CodeDeploy deploymentId 추출
-                Object checkResultObj = outputMap.get("checkResult");
-                if (checkResultObj instanceof Map) {
-                    Map<String, Object> checkResult = (Map<String, Object>) checkResultObj;
-                    if (checkResult.containsKey("deploymentId")) {
-                        String codeDeployDeploymentId = (String) checkResult.get("deploymentId");
-                        log.info("📍 [CodeDeploy-ID] Extracted CodeDeploy deploymentId: {}", codeDeployDeploymentId);
-                        // outputMap에 저장 (호출자에서 추출 가능)
-                        outputMap.put("codeDeployDeploymentId", codeDeployDeploymentId);
+                // ✅ CheckDeployment → nested 구조에서 CodeDeploy deploymentId 정확히 추출
+                try {
+                    Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
+                    if (checkResult != null) {
+                        Map<String, Object> payload = (Map<String, Object>) checkResult.get("Payload");
+                        if (payload != null) {
+                            Map<String, Object> innerCheck = (Map<String, Object>) payload.get("checkResult");
+                            if (innerCheck != null && innerCheck.containsKey("deploymentId")) {
+                                String codeDeployDeploymentId = (String) innerCheck.get("deploymentId");
+                                log.info("📌 [Correct Extract] CodeDeploy deploymentId = {}", codeDeployDeploymentId);
+                                // context 저장을 위해 outputMap에 넣기
+                                outputMap.put("codeDeployDeploymentId", codeDeployDeploymentId);
+                            }
+                        }
                     }
+                } catch (Exception e) {
+                    log.warn("Failed to extract CodeDeploy deploymentId from CheckDeployment output", e);
                 }
                 // CheckDeployment는 상태 업데이트 없이 진행
                 return null;
@@ -1157,6 +1164,7 @@ public class StepFunctionsPollingService {
                                 if (stageStatus != null && stageStatus.contains("REGISTER_TASK")) {
                                     log.info("📤 [AWS Step Functions] RegisterTaskAndDeploy output - Stage: {}, Payload: {}", stageStatus, objectMapper.writeValueAsString(outputMap));
                                     String greenUrl = null;
+                                    String codeDeployDeploymentId = null;  // ✅ 블록 스코프에서 선언
                                     if (outputMap.containsKey("blueService")) {
                                         Object blueObj = outputMap.get("blueService");
                                         if (blueObj instanceof Map) {
@@ -1181,7 +1189,27 @@ public class StepFunctionsPollingService {
                                     if (outputMap.containsKey("serviceName")) {
                                         context.put("serviceName", outputMap.get("serviceName"));
                                     }
-                                    // CodeDeploy 정보 저장
+
+                                    // ✅ CodeDeploy deploymentId 추출 (deployResult.Payload.deploymentId)
+                                    if (outputMap.containsKey("deployResult")) {
+                                        Object deployResultObj = outputMap.get("deployResult");
+                                        if (deployResultObj instanceof Map) {
+                                            Map<String, Object> deployResult = (Map<String, Object>) deployResultObj;
+                                            if (deployResult.containsKey("Payload")) {
+                                                Object payloadObj = deployResult.get("Payload");
+                                                if (payloadObj instanceof Map) {
+                                                    Map<String, Object> payload = (Map<String, Object>) payloadObj;
+                                                    if (payload.containsKey("deploymentId")) {
+                                                        codeDeployDeploymentId = (String) payload.get("deploymentId");
+                                                        context.put("codeDeployDeploymentId", codeDeployDeploymentId);
+                                                        log.info("📌 [CodeDeploy-ID-Extracted] Extracted codeDeployDeploymentId from RegisterTaskAndDeploy: {}", codeDeployDeploymentId);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // CodeDeploy 정보 저장 (이전 방식 - 호환성)
                                     if (outputMap.containsKey("codeDeployDeploymentId")) {
                                         context.put("codeDeployDeploymentId", outputMap.get("codeDeployDeploymentId"));
                                     }
@@ -1192,7 +1220,6 @@ public class StepFunctionsPollingService {
                                     // Health Check 실행 (Green URL이 있는 경우)
                                     if (greenUrl != null && !greenUrl.isEmpty()) {
                                         try {
-                                            String codeDeployDeploymentId = (String) context.get("codeDeployDeploymentId");
                                             String codeDeployApplicationName = (String) context.get("codeDeployApplicationName");
                                             triggerHealthCheck(deploymentId, greenUrl, codeDeployDeploymentId,
                                                 codeDeployApplicationName, awsConnection);
@@ -1398,6 +1425,11 @@ public class StepFunctionsPollingService {
                 }
             }
 
+            // ✅ CodeDeploy deploymentId 저장 (성공/실패 모두)
+            if (monitoringContext.containsKey("codeDeployDeploymentId")) {
+                result.setCodeDeployDeploymentId((String) monitoringContext.get("codeDeployDeploymentId"));
+            }
+
             // 결과 저장
             deploymentResultStore.save(result);
             log.info("Deployment result saved - deploymentId: {}, status: {}, duration: {}s",
@@ -1496,11 +1528,12 @@ public class StepFunctionsPollingService {
             }
 
             deploymentResultStore.save(result);
-            log.info("Deployment ready result saved - deploymentId: {}, status: DEPLOYMENT_READY, duration: {}s, " +
-                "blueLatencyMs: {}, greenLatencyMs: {}, blueErrorRate: {}, greenErrorRate: {}",
+            log.info("✅ Deployment ready result saved - deploymentId: {}, status: DEPLOYMENT_READY, duration: {}s, " +
+                "blueLatencyMs: {}, greenLatencyMs: {}, blueErrorRate: {}, greenErrorRate: {}, codeDeployDeploymentId: {}",
                 deploymentId, durationSeconds,
                 result.getBlueLatencyMs(), result.getGreenLatencyMs(),
-                result.getBlueErrorRate(), result.getGreenErrorRate());
+                result.getBlueErrorRate(), result.getGreenErrorRate(),
+                result.getCodeDeployDeploymentId());
 
         } catch (Exception e) {
             log.error("Failed to save deployment ready result for deploymentId: {}", deploymentId, e);
