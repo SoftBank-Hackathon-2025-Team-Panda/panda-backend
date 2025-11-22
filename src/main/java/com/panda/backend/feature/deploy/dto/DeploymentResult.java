@@ -29,6 +29,8 @@ public class DeploymentResult {
     private String finalService;        // blue or green
     private String blueUrl;             // Blue 서비스 URL
     private String greenUrl;            // Green 서비스 URL
+    private String blueServiceArn;      // Blue 서비스 ARN (ECS)
+    private String greenServiceArn;     // Green 서비스 ARN (ECS)
     private String errorMessage;        // 실패 시 에러 메시지
 
     // 성능 메트릭

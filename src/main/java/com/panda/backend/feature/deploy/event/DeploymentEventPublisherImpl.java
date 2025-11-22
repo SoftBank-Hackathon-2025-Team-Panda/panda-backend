@@ -85,11 +85,11 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
             Integer stageNumber = mapStepFunctionsStageToNumber(stepFunctionsStage);
 
             DeploymentEvent event = new DeploymentEvent();
-            event.setType("stepFunctionsProgress");
+            event.setType("stage");  // ✅ stage 타입으로 변경
             event.setMessage(message);
             event.setDetails(Map.of(
+                "stage", stageNumber,
                 "stepFunctionsStage", stepFunctionsStage,
-                "stageNumber", stageNumber,
                 "timestamp", java.time.LocalDateTime.now().toString()
             ));
 

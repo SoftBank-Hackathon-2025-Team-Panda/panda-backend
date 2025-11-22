@@ -174,10 +174,5 @@ public class DeploymentEventStore {
         }
     }
 
-    // 이벤트 히스토리 크기 조회
-    public Integer getEventHistorySize(String deploymentId) {
-        Queue<DeploymentEvent> events = eventHistoryMap.get(deploymentId);
-        return events != null ? events.size() : 0;
-    }
 
 }

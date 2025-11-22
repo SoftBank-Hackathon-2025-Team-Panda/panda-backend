@@ -5,6 +5,7 @@ import com.panda.backend.feature.connect.entity.AwsConnection;
 import com.panda.backend.feature.deploy.dto.MonitorCloudWatchResponse;
 import com.panda.backend.feature.deploy.dto.DeploymentResult;
 import com.panda.backend.feature.deploy.event.DeploymentEventPublisher;
+import com.panda.backend.feature.deploy.event.DeploymentEventStore;
 import com.panda.backend.feature.deploy.infrastructure.ExecutionArnStore;
 import com.panda.backend.feature.deploy.infrastructure.DeploymentResultStore;
 import lombok.RequiredArgsConstructor;
@@ -39,6 +40,7 @@ public class StepFunctionsPollingService {
     private final SfnClient sfnClient;
     private final ExecutionArnStore executionArnStore;
     private final DeploymentEventPublisher eventPublisher;
+    private final DeploymentEventStore deploymentEventStore;
     private final ObjectMapper objectMapper;
     private final MonitorCloudWatchService monitorCloudWatchService;
     private final EcsServiceUrlResolverService ecsServiceUrlResolverService;
@@ -185,13 +187,22 @@ public class StepFunctionsPollingService {
                         eventCount++;
                     }
 
-                    // Stage 4 완료 시 배포 완료 (CheckDeployment는 이제 없음)
-                    if ("REGISTER_TASK_COMPLETED".equals(currentStage)) {
-                        log.info("RegisterTaskAndDeploy completed for deploymentId: {}, finalizing deployment", deploymentId);
-                        // 최종 결과 저장
-                        saveFinalDeploymentResult(deploymentId, owner, repo, branch, "SUCCEEDED",
+                    // ✅ CheckDeployment에서 WAITING_APPROVAL 상태 감지 (배포 준비 완료)
+                    if ("DEPLOYMENT_READY".equals(currentStage)) {
+                        log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
+                        // 배포 준비 완료 상태로 저장 (수동 전환 대기)
+                        saveDeploymentReadyResult(deploymentId, owner, repo, branch,
                             monitoringContext, pollingStartTime, eventCount);
-                        break;
+
+                        // ✅ SSE 연결 종료 신호: success 이벤트 발행 (프론트가 SSE를 종료하기 위함)
+                        deploymentEventStore.sendDoneEvent(deploymentId, "Deployment ready for manual traffic switch");
+                        break;  // ✅ 폴링 종료
+                    }
+
+                    // Stage 4 완료 시 배포 완료 (RegisterTaskAndDeploy 만 완료)
+                    if ("REGISTER_TASK_COMPLETED".equals(currentStage)) {
+                        log.debug("RegisterTaskAndDeploy completed, waiting for CheckDeployment...");
+                        // 계속 폴링 진행 (CheckDeployment 응답을 기다림)
                     }
 
                     // 완료/실패 시 폴링 종료
@@ -304,9 +315,6 @@ public class StepFunctionsPollingService {
                     }
                 }
 
-                // TaskStateExited 이벤트 (Task 완료)
-                // NOTE: TaskStateExited는 analyzeExecutionHistoryWithContext에서 처리됨
-                // 여기서는 스킵
             }
         } catch (Exception e) {
             log.error("Error analyzing execution history for deploymentId: {}", deploymentId, e);
@@ -404,8 +412,52 @@ public class StepFunctionsPollingService {
                 return "REGISTER_TASK_COMPLETED";
             }
 
-            // ✅ CheckDeployment는 Stage 5가 아니므로 무시 (내부 상태만 추적)
-            // Stage 4까지만 사용하므로 CheckDeployment 완료 이벤트는 발행하지 않음
+            // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지
+            if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
+                Object statusObj = outputMap.get("status");
+                if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
+                    log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
+
+                    // Blue/Green 서비스 정보 추출
+                    String blueUrl = null;
+                    String greenUrl = null;
+                    String blueServiceArn = null;
+                    String greenServiceArn = null;
+
+                    if (outputMap.containsKey("checkResult")) {
+                        Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
+                        if (checkResult != null) {
+                            if (checkResult.containsKey("blueTargetGroupArn")) {
+                                blueServiceArn = (String) checkResult.get("blueTargetGroupArn");
+                            }
+                            if (checkResult.containsKey("greenTargetGroupArn")) {
+                                greenServiceArn = (String) checkResult.get("greenTargetGroupArn");
+                            }
+                        }
+                    }
+
+                    // outputMap에서 URL 추출
+                    if (outputMap.containsKey("blueUrl")) {
+                        blueUrl = (String) outputMap.get("blueUrl");
+                    }
+                    if (outputMap.containsKey("greenUrl")) {
+                        greenUrl = (String) outputMap.get("greenUrl");
+                    }
+
+                    // 배포 준비 완료 이벤트 발행
+                    Map<String, Object> readyDetails = new HashMap<>();
+                    readyDetails.put("stage", 4);
+                    if (blueServiceArn != null) readyDetails.put("blueServiceArn", blueServiceArn);
+                    if (greenServiceArn != null) readyDetails.put("greenServiceArn", greenServiceArn);
+                    if (blueUrl != null) readyDetails.put("blueUrl", blueUrl);
+                    if (greenUrl != null) readyDetails.put("greenUrl", greenUrl);
+                    readyDetails.put("message", "POST /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요");
+
+                    publishStageEvent(deploymentId, 4, "Green 서비스 배포 완료 - 트래픽 전환 대기 중", readyDetails);
+
+                    return "DEPLOYMENT_READY";
+                }
+            }
 
         } catch (Exception e) {
             log.debug("Failed to analyze TaskStateExited", e);
@@ -835,6 +887,35 @@ public class StepFunctionsPollingService {
                                         }
                                     }
                                 }
+
+                                // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 저장
+                                if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
+                                    Object statusObj = outputMap.get("status");
+                                    if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
+                                        log.info("Deployment ready - extracting Blue/Green info for context");
+
+                                        // checkResult에서 Target Group ARN 추출
+                                        if (outputMap.containsKey("checkResult")) {
+                                            Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
+                                            if (checkResult != null) {
+                                                if (checkResult.containsKey("blueTargetGroupArn")) {
+                                                    context.put("blueServiceArn", checkResult.get("blueTargetGroupArn"));
+                                                }
+                                                if (checkResult.containsKey("greenTargetGroupArn")) {
+                                                    context.put("greenServiceArn", checkResult.get("greenTargetGroupArn"));
+                                                }
+                                            }
+                                        }
+
+                                        // outputMap에서 URL 추출
+                                        if (outputMap.containsKey("blueUrl")) {
+                                            context.put("blueUrl", outputMap.get("blueUrl"));
+                                        }
+                                        if (outputMap.containsKey("greenUrl")) {
+                                            context.put("greenUrl", outputMap.get("greenUrl"));
+                                        }
+                                    }
+                                }
                             }
                         } catch (Exception e) {
                             log.debug("Failed to extract monitoring context", e);
@@ -1034,6 +1115,63 @@ public class StepFunctionsPollingService {
 
         } catch (Exception e) {
             log.error("Failed to save deployment result for deploymentId: {}", deploymentId, e);
+        }
+    }
+
+    /**
+     * 배포 준비 완료 결과 저장 (수동 전환 대기 상태)
+     *
+     * @param deploymentId 배포 ID
+     * @param owner GitHub owner
+     * @param repo GitHub repo
+     * @param branch 배포 브랜치
+     * @param monitoringContext 모니터링 컨텍스트 (Blue/Green URL 등)
+     * @param startTimeMs 배포 시작 시간 (밀리초)
+     * @param eventCount 발행된 이벤트 개수
+     */
+    private void saveDeploymentReadyResult(String deploymentId, String owner, String repo, String branch,
+                                          Map<String, Object> monitoringContext,
+                                          long startTimeMs, int eventCount) {
+        try {
+            LocalDateTime startedAt = LocalDateTime.now().minusNanos((System.currentTimeMillis() - startTimeMs) * 1_000_000);
+            LocalDateTime completedAt = LocalDateTime.now();
+            long durationSeconds = (System.currentTimeMillis() - startTimeMs) / 1000;
+
+            // 배포 준비 완료 상태로 저장
+            DeploymentResult result = DeploymentResult.builder()
+                .deploymentId(deploymentId)
+                .status("DEPLOYMENT_READY")  // ✅ 수동 전환 대기 상태
+                .owner(owner)
+                .repo(repo)
+                .branch(branch)
+                .startedAt(startedAt)
+                .completedAt(completedAt)
+                .durationSeconds(durationSeconds)
+                .eventCount(eventCount)
+                .build();
+
+            // Blue/Green URL 저장
+            if (monitoringContext.containsKey("blueUrl")) {
+                result.setBlueUrl((String) monitoringContext.get("blueUrl"));
+            }
+            if (monitoringContext.containsKey("greenUrl")) {
+                result.setGreenUrl((String) monitoringContext.get("greenUrl"));
+            }
+
+            // Blue/Green Service ARN 저장
+            if (monitoringContext.containsKey("blueServiceArn")) {
+                result.setBlueServiceArn((String) monitoringContext.get("blueServiceArn"));
+            }
+            if (monitoringContext.containsKey("greenServiceArn")) {
+                result.setGreenServiceArn((String) monitoringContext.get("greenServiceArn"));
+            }
+
+            deploymentResultStore.save(result);
+            log.info("Deployment ready result saved - deploymentId: {}, status: DEPLOYMENT_READY, duration: {}s",
+                deploymentId, durationSeconds);
+
+        } catch (Exception e) {
+            log.error("Failed to save deployment ready result for deploymentId: {}", deploymentId, e);
         }
     }
 
