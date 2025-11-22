@@ -591,14 +591,22 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * CheckDeployment 파싱 - 실제 JSON 구조 기준
-     * outputMap.checkResult.{deploymentId, blueTargetGroupArn, greenTargetGroupArn}
+     * CheckDeployment 파싱 - Lambda Invoke 결과 구조 (Payload 래핑)
+     * outputMap.checkResult.Payload.checkResult.{deploymentId, blueTargetGroupArn, greenTargetGroupArn}
      */
     private void parseCheckDeployment(Map<String, Object> outputMap, Map<String, Object> context) {
 
         try {
-            // checkResult (1뎁스만 있음)
-            Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
+            // 1st layer: checkResult
+            Map<String, Object> checkResultWrapper = (Map<String, Object>) outputMap.get("checkResult");
+            if (checkResultWrapper == null) return;
+
+            // 2nd layer: Payload (Lambda Invoke wrapper)
+            Map<String, Object> payload = (Map<String, Object>) checkResultWrapper.get("Payload");
+            if (payload == null) return;
+
+            // 3rd layer: actual checkResult inside Payload
+            Map<String, Object> checkResult = (Map<String, Object>) payload.get("checkResult");
             if (checkResult == null) return;
 
             // CodeDeploy DeploymentId
@@ -1189,19 +1197,21 @@ public class StepFunctionsPollingService {
                         log.debug("Failed to log TaskStateExited details", e);
                     }
 
+                    // TaskStateExited 처리
+                    var stateExitedDetails = event.stateExitedEventDetails();
+                    String taskName = stateExitedDetails != null ? stateExitedDetails.name() : null;
+                    String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
+
                     String stage = analyzeTaskStateExited(deploymentId, event, awsConnection);
                     if (stage != null) {
                         currentStage = stage;
+                    }
 
-                        // TaskStateExited에서 추출된 정보를 context에 저장
+                    // TaskStateExited에서 추출된 정보를 context에 저장
+                    if (taskOutput != null && !taskOutput.isEmpty()) {
                         try {
-                            // ✅ AWS SDK getter를 통해 output 직접 추출
-                            var stateExitedDetails = event.stateExitedEventDetails();
-                            String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
-
-                            if (taskOutput != null && !taskOutput.isEmpty()) {
-                                // 🔥 정답: JSON 최상단 자체가 outputMap
-                                Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+                            // 🔥 정답: JSON 최상단 자체가 outputMap
+                            Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
 
                                 String stageStatus = (String) outputMap.get("stage");
 
@@ -1274,59 +1284,24 @@ public class StepFunctionsPollingService {
                                     }
                                 }
 
-                                // ✅ CheckDeployment Task 감지 (3분 자동 대기)
-                                if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
-                                    log.info("✅ [CheckDeployment-Detected-Polling] CheckDeployment Task 감지! 3분 자동 대기 후 DEPLOYMENT_READY 상태로 변경 - deploymentId: {}", deploymentId);
-                                    log.info("📤 [CheckDeployment-Output-Polling] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
+                            // ✅ CheckDeployment Task 감지 (taskName 기반)
+                            if ("CheckDeployment".equals(taskName)) {
+                                log.info("✅ [CheckDeployment-Detected-Polling] CheckDeployment Task 완료! DEPLOYMENT_READY 상태로 변경 - deploymentId: {}", deploymentId);
+                                log.info("📤 [CheckDeployment-Output-Polling] fullOutput: {}", objectMapper.writeValueAsString(outputMap));
 
-                                    // ✅ CheckDeployment output에서 메트릭 정보 추출
-                                    Map<String, Object> healthCheckDetails = extractHealthCheckDetails(outputMap);
-                                    log.info("📊 [Metrics-Extracted] Extracted metrics: blueLatencyMs={}, greenLatencyMs={}, blueErrorRate={}, greenErrorRate={}",
-                                        healthCheckDetails.get("blueLatencyMs"),
-                                        healthCheckDetails.get("greenLatencyMs"),
-                                        healthCheckDetails.get("blueErrorRate"),
-                                        healthCheckDetails.get("greenErrorRate"));
-
-                                    // ✅ 메트릭을 모니터링 컨텍스트에 저장
-                                    if (healthCheckDetails.containsKey("blueLatencyMs")) {
-                                        context.put("blueLatencyMs", healthCheckDetails.get("blueLatencyMs"));
-                                    }
-                                    if (healthCheckDetails.containsKey("greenLatencyMs")) {
-                                        context.put("greenLatencyMs", healthCheckDetails.get("greenLatencyMs"));
-                                    }
-                                    if (healthCheckDetails.containsKey("blueErrorRate")) {
-                                        context.put("blueErrorRate", healthCheckDetails.get("blueErrorRate"));
-                                    }
-                                    if (healthCheckDetails.containsKey("greenErrorRate")) {
-                                        context.put("greenErrorRate", healthCheckDetails.get("greenErrorRate"));
-                                    }
-                                    if (healthCheckDetails.containsKey("blueUrl")) {
-                                        context.put("blueUrl", healthCheckDetails.get("blueUrl"));
-                                    }
-                                    if (healthCheckDetails.containsKey("greenUrl")) {
-                                        context.put("greenUrl", healthCheckDetails.get("greenUrl"));
-                                    }
-
-                                    // ✅ CheckDeployment 출력에서 codeDeployDeploymentId 직접 추출 (RegisterTaskAndDeploy가 없었을 경우 대비)
-                                    if (outputMap.containsKey("deploymentId")) {
-                                        String deploymentIdValue = (String) outputMap.get("deploymentId");
-                                        if (deploymentIdValue != null && !deploymentIdValue.isEmpty()) {
-                                            context.put("codeDeployDeploymentId", deploymentIdValue);
-                                            log.info("📌 [CheckDeployment-CodeDeploy] Extracted codeDeployDeploymentId from CheckDeployment output: {}", deploymentIdValue);
-                                        }
-                                    }
-
-                                    // ✅ DEPLOYMENT_READY stage로 업데이트
-                                    currentStage = "DEPLOYMENT_READY";
-                                    return new PollingResult(currentStage, maxEventId);
+                                // ✅ parseCheckDeployment에서 추출된 정보 확인
+                                if (context.containsKey("codeDeployDeploymentId")) {
+                                    log.info("📌 [CheckDeployment-CodeDeploy] codeDeployDeploymentId already in context: {}", context.get("codeDeployDeploymentId"));
+                                } else {
+                                    log.warn("⚠️ [CheckDeployment-CodeDeploy] codeDeployDeploymentId NOT in context - may have failed to parse");
                                 }
+
+                                // ✅ DEPLOYMENT_READY stage로 업데이트
+                                currentStage = "DEPLOYMENT_READY";
+                                return new PollingResult(currentStage, maxEventId);
                             }
                         } catch (Exception e) {
                             log.debug("Failed to extract monitoring context", e);
-                        }
-
-                        if (currentStage != null) {
-                            return new PollingResult(currentStage, maxEventId);  // ✅ PollingResult 반환
                         }
                     }
                 }
