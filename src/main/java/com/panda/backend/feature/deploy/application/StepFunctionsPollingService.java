@@ -351,6 +351,7 @@ public class StepFunctionsPollingService {
 
             // Stage 3: EnsureInfra
             if ("EnsureInfra".equals(taskName)) {
+                log.info("📤 [AWS Step Functions] TaskStateEntered - Task: {}", taskName);
                 publishStageEvent(deploymentId, 3, "ECS 배포 시작 중",
                     Map.of("stage", 3));
                 return "ENSURE_INFRA_IN_PROGRESS";
@@ -358,6 +359,7 @@ public class StepFunctionsPollingService {
 
             // Stage 4: RegisterTaskAndDeploy (CodeDeploy Blue/Green)
             if ("RegisterTaskAndDeploy".equals(taskName)) {
+                log.info("📤 [AWS Step Functions] TaskStateEntered - Task: {}", taskName);
                 publishStageEvent(deploymentId, 4, "CodeDeploy Blue/Green 배포 시작",
                     Map.of("stage", 4));
                 return "REGISTER_TASK_IN_PROGRESS";
@@ -400,6 +402,7 @@ public class StepFunctionsPollingService {
 
             // Stage 3: EnsureInfra 완료
             if (stageStatus != null && stageStatus.contains("ENSURE_INFRA")) {
+                log.info("📤 [AWS Step Functions] CheckDeployment output - Stage: {}, Payload: {}", stageStatus, objectMapper.writeValueAsString(outputMap));
                 Map<String, Object> details = extractEnsureInfraDetails(outputMap);
                 publishStageEvent(deploymentId, 3, "ECS 배포 완료", details);
                 return "ENSURE_INFRA_COMPLETED";
@@ -407,6 +410,7 @@ public class StepFunctionsPollingService {
 
             // Stage 4: RegisterTaskAndDeploy 완료 (Blue/Green 배포 진행)
             if (stageStatus != null && stageStatus.contains("REGISTER_TASK")) {
+                log.info("📤 [AWS Step Functions] RegisterTaskAndDeploy output - Stage: {}, Payload: {}", stageStatus, objectMapper.writeValueAsString(outputMap));
                 Map<String, Object> details = extractBlueGreenDetails(deploymentId, outputMap, awsConnection);
                 publishStageEvent(deploymentId, 4, "CodeDeploy Blue/Green 배포 진행 중", details);
                 return "REGISTER_TASK_COMPLETED";
@@ -416,6 +420,7 @@ public class StepFunctionsPollingService {
             if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
                 Object statusObj = outputMap.get("status");
                 if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
+                    log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
                     log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
 
                     // Blue/Green 서비스 정보 추출
@@ -795,7 +800,6 @@ public class StepFunctionsPollingService {
             for (HistoryEvent event : sortedEvents) {
                 // ✅ 마지막 처리한 이벤트 ID보다 작거나 같으면 스킵 (중복 제거)
                 if (event.id() <= lastProcessedEventId) {
-                    log.debug("Skipping already processed event: id={}, type={}", event.id(), event.typeAsString());
                     continue;
                 }
 
@@ -805,6 +809,7 @@ public class StepFunctionsPollingService {
 
                 // ExecutionFailed 체크
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionFailed")) {
+                    log.info("📤 [AWS Step Functions] ExecutionFailed - Event ID: {}", event.id());
                     log.warn("Execution failed for deploymentId: {}", deploymentId);
                     publishStageEvent(deploymentId, 4, "배포 실패");  // ✅ Stage 4까지만 사용
                     return new PollingResult("FAILED", maxEventId);  // ✅ PollingResult 반환
@@ -812,6 +817,7 @@ public class StepFunctionsPollingService {
 
                 // ExecutionSucceeded 체크
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionSucceeded")) {
+                    log.info("📤 [AWS Step Functions] ExecutionSucceeded - Event ID: {}", event.id());
                     log.info("Execution succeeded for deploymentId: {}", deploymentId);
                     publishStageEvent(deploymentId, 4, "배포 완료", Map.of("finalService", "green"));  // ✅ Stage 4까지만 사용
                     return new PollingResult("SUCCEEDED", maxEventId);  // ✅ PollingResult 반환
@@ -842,6 +848,7 @@ public class StepFunctionsPollingService {
 
                                 // Stage 4 완료 - Blue/Green 서비스 정보 저장
                                 if (stageStatus != null && stageStatus.contains("REGISTER_TASK")) {
+                                    log.info("📤 [AWS Step Functions] RegisterTaskAndDeploy output - Stage: {}, Payload: {}", stageStatus, objectMapper.writeValueAsString(outputMap));
                                     String greenUrl = null;
                                     if (outputMap.containsKey("blueService")) {
                                         Object blueObj = outputMap.get("blueService");
@@ -892,6 +899,7 @@ public class StepFunctionsPollingService {
                                 if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
                                     Object statusObj = outputMap.get("status");
                                     if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
+                                        log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
                                         log.info("Deployment ready - extracting Blue/Green info for context");
 
                                         // checkResult에서 Target Group ARN 추출
