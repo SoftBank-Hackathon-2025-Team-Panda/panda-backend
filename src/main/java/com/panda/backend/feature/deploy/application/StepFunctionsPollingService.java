@@ -519,9 +519,12 @@ public class StepFunctionsPollingService {
             log.info("📤 [TaskStateExited-Direct] Task: {}, Got output from AWS SDK directly: {}",
                 taskName, taskOutput.length() > 300 ? taskOutput.substring(0, 300) + "..." : taskOutput);
 
-            Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+            // 🔥 정답 경로: root → output → Payload
+            Map<String, Object> root = objectMapper.readValue(taskOutput, Map.class);
+            Map<String, Object> outputMap = (Map<String, Object>) root.get("output");
+
             log.info("📤 [TaskStateExited-FULL-JSON] Task: {}, fullOutput: {}",
-                taskName, objectMapper.writeValueAsString(outputMap));
+                taskName, objectMapper.writeValueAsString(root));
 
             // -------------------------
             // 1) EnsureInfra
@@ -559,21 +562,11 @@ public class StepFunctionsPollingService {
             // 3) CheckDeployment
             // -------------------------
             if ("CheckDeployment".equals(taskName)) {
+                Map<String, Object> context = new HashMap<>();
+                parseCheckDeployment(outputMap, context);
 
-                Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
-                if (checkResult != null) {
-
-                    Map<String, Object> payload = (Map<String, Object>) checkResult.get("Payload");
-                    if (payload != null) {
-
-                        Map<String, Object> inner = (Map<String, Object>) payload.get("checkResult");
-                        if (inner != null) {
-                            if (inner.get("deploymentId") != null) {
-                                outputMap.put("codeDeployDeploymentId", inner.get("deploymentId"));
-                            }
-                        }
-                    }
-                }
+                // 파싱된 데이터를 outputMap에 저장 (상위 로직에서 접근 가능)
+                outputMap.putAll(context);
 
                 return null; // stage 변화 없음 (4 → 내부 로직 유지)
             }
@@ -582,18 +575,12 @@ public class StepFunctionsPollingService {
             // 4) RunMetrics
             // -------------------------
             if ("RunMetrics".equals(taskName)) {
+                Map<String, Object> context = new HashMap<>();
+                parseRunMetrics(outputMap, context);
 
-                Map<String, Object> metricsResult = (Map<String, Object>) outputMap.get("metricsResult");
-                if (metricsResult != null) {
-                    Map<String, Object> payload = (Map<String, Object>) metricsResult.get("Payload");
-                    if (payload != null) {
+                // 파싱된 메트릭을 outputMap에 저장
+                outputMap.putAll(context);
 
-                        Map<String, Object> metricsDetails = extractHealthCheckDetails(payload);
-
-                        // push metrics into outputMap for upper layer
-                        outputMap.putAll(metricsDetails);
-                    }
-                }
                 return null; // stage 변화 없음
             }
 
@@ -602,6 +589,68 @@ public class StepFunctionsPollingService {
         }
 
         return null;
+    }
+
+    /**
+     * CheckDeployment 파싱 정답 코드
+     */
+    private void parseCheckDeployment(Map<String, Object> outputMap, Map<String, Object> context) {
+
+        try {
+            Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+            if (payload == null) return;
+
+            Map<String, Object> checkResult = (Map<String, Object>) payload.get("checkResult");
+            if (checkResult == null) return;
+
+            // CodeDeploy DeploymentId
+            if (checkResult.get("deploymentId") != null) {
+                context.put("codeDeployDeploymentId", checkResult.get("deploymentId"));
+            }
+
+            // Blue TargetGroup
+            if (checkResult.get("blueTargetGroupArn") != null) {
+                context.put("blueTargetGroupArn", checkResult.get("blueTargetGroupArn"));
+            }
+
+            // Green TargetGroup
+            if (checkResult.get("greenTargetGroupArn") != null) {
+                context.put("greenTargetGroupArn", checkResult.get("greenTargetGroupArn"));
+            }
+
+        } catch (Exception e) {
+            log.error("❌ Failed to parse CheckDeployment output", e);
+        }
+    }
+
+    /**
+     * RunMetrics 파싱 정답 코드
+     */
+    private void parseRunMetrics(Map<String, Object> outputMap, Map<String, Object> context) {
+
+        try {
+            Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+            if (payload == null) return;
+
+            // BLUE metrics
+            Map<String, Object> blue = (Map<String, Object>) payload.get("blue");
+            if (blue != null) {
+                context.put("blueUrl", blue.get("url"));
+                context.put("blueLatencyMs", blue.get("latencyMs"));
+                context.put("blueErrorRate", blue.get("errorRate"));
+            }
+
+            // GREEN metrics
+            Map<String, Object> green = (Map<String, Object>) payload.get("green");
+            if (green != null) {
+                context.put("greenUrl", green.get("url"));
+                context.put("greenLatencyMs", green.get("latencyMs"));
+                context.put("greenErrorRate", green.get("errorRate"));
+            }
+
+        } catch (Exception e) {
+            log.error("❌ Failed to parse RunMetrics output", e);
+        }
     }
 
 
@@ -1138,7 +1187,11 @@ public class StepFunctionsPollingService {
                             String taskOutput = stateExitedDetails != null ? stateExitedDetails.output() : null;
 
                             if (taskOutput != null && !taskOutput.isEmpty()) {
-                                Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+                                // 🔥 정답 경로: root → output → Payload
+                                Map<String, Object> root = objectMapper.readValue(taskOutput, Map.class);
+                                Map<String, Object> outputMap = (Map<String, Object>) root.get("output");
+                                Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+
                                 String stageStatus = (String) outputMap.get("stage");
 
                                 // Stage 4 완료 - Blue/Green 서비스 정보 저장
@@ -1179,9 +1232,9 @@ public class StepFunctionsPollingService {
                                             if (deployResult.containsKey("Payload")) {
                                                 Object payloadObj = deployResult.get("Payload");
                                                 if (payloadObj instanceof Map) {
-                                                    Map<String, Object> payload = (Map<String, Object>) payloadObj;
-                                                    if (payload.containsKey("deploymentId")) {
-                                                        codeDeployDeploymentId = (String) payload.get("deploymentId");
+                                                    Map<String, Object> innerPayload = (Map<String, Object>) payloadObj;
+                                                    if (innerPayload.containsKey("deploymentId")) {
+                                                        codeDeployDeploymentId = (String) innerPayload.get("deploymentId");
                                                         context.put("codeDeployDeploymentId", codeDeployDeploymentId);
                                                         log.info("📌 [CodeDeploy-ID-Extracted] Extracted codeDeployDeploymentId from RegisterTaskAndDeploy: {}", codeDeployDeploymentId);
                                                     }
