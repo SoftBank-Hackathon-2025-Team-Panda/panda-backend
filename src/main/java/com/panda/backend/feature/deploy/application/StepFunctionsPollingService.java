@@ -56,6 +56,9 @@ public class StepFunctionsPollingService {
     @Value("${aws.step-functions.wait-for-execution-arn-ms:10000}")
     private long waitForExecutionArnMs;
 
+    @Value("${aws.step-functions.stale-event-timeout-ms:120000}")
+    private long staleEventTimeoutMs;
+
     @Value("${aws.lambda.monitor-interval-seconds:30}")
     private long monitorIntervalSeconds;
 
@@ -165,6 +168,7 @@ public class StepFunctionsPollingService {
             log.info("🚀 [POLLING-STARTED] deploymentId: {} - Starting Step Functions history polling...", deploymentId);
 
             // Step 2: ExecutionHistory 폴링 (최대 30분)
+            long lastNewEventTime = System.currentTimeMillis();  // ✅ 마지막 새 이벤트 도착 시간
             while (System.currentTimeMillis() - pollingStartTime < maxPollingDurationMs) {
                 pollCount++;
                 long pollStartTime = System.currentTimeMillis();
@@ -188,7 +192,14 @@ public class StepFunctionsPollingService {
                     );
 
                     String currentStage = pollingResult.currentStage;
+                    long previousLastEventId = lastProcessedEventId;
                     lastProcessedEventId = pollingResult.lastEventId;  // ✅ 마지막 이벤트 ID 업데이트
+
+                    // ✅ 새 이벤트가 도착했으면 타이머 리셋
+                    if (lastProcessedEventId > previousLastEventId) {
+                        lastNewEventTime = System.currentTimeMillis();
+                        log.debug("New events received - lastEventId: {} (was: {})", lastProcessedEventId, previousLastEventId);
+                    }
 
                     // 현재 실행 상태 상세 로깅
                     long apiCallElapsedMs = System.currentTimeMillis() - pollStartTime;
@@ -250,6 +261,35 @@ public class StepFunctionsPollingService {
                         // 최종 결과 저장
                         saveFinalDeploymentResult(deploymentId, owner, repo, branch, currentStage,
                             monitoringContext, pollingStartTime, eventCount);
+                        break;
+                    }
+
+                    // ✅ Stale Event 체크: 새 이벤트가 도착하지 않은 지 너무 오래된 경우
+                    long timeSinceLastNewEvent = System.currentTimeMillis() - lastNewEventTime;
+                    if (timeSinceLastNewEvent > staleEventTimeoutMs && lastProcessedEventId > 0) {
+                        log.warn("Step Functions execution appears to be stuck - no new events for {}ms, lastEventId: {}, deploymentId: {}",
+                            timeSinceLastNewEvent, lastProcessedEventId, deploymentId);
+                        String errorMsg = String.format("Step Functions execution stuck: no new events for %d seconds. " +
+                            "Current stage is likely waiting for external intervention or has deadlocked.",
+                            staleEventTimeoutMs / 1000);
+
+                        // 상세정보와 함께 에러 발행
+                        Map<String, Object> errorDetails = Map.of(
+                            "errorCode", "EXECUTION_STALLED",
+                            "errorMessage", errorMsg,
+                            "deploymentId", deploymentId,
+                            "lastEventId", lastProcessedEventId,
+                            "stallDurationMs", timeSinceLastNewEvent,
+                            "currentStage", currentStage,
+                            "pollCount", pollCount,
+                            "suggestion", "AWS Step Functions 실행 상태를 확인하고, 필요시 수동으로 실행을 재개하거나 취소하세요.",
+                            "timestamp", java.time.LocalDateTime.now().toString()
+                        );
+                        eventPublisher.publishErrorEvent(deploymentId, errorMsg, errorDetails);
+
+                        // Stale 상태로 결과 저장
+                        saveTimeoutResult(deploymentId, owner, repo, branch, pollingStartTime, eventCount,
+                            "Step Functions 실행이 진행되지 않음 (stalled)");
                         break;
                     }
 
@@ -458,6 +498,9 @@ public class StepFunctionsPollingService {
             }
 
             Map<String, Object> outputMap = objectMapper.readValue(taskOutput, Map.class);
+            // ✅ 전체 output JSON 로깅
+            log.info("📤 [TaskStateExited-FULL-JSON] taskName: {}, fullOutput: {}", taskName, objectMapper.writeValueAsString(outputMap));
+
             String stageStatus = (String) outputMap.get("stage");
 
             // Stage 3: EnsureInfra 완료
@@ -479,6 +522,20 @@ public class StepFunctionsPollingService {
             // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지
             if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
                 Object statusObj = outputMap.get("status");
+
+                // ✅ Payload 필드가 있는 경우 처리
+                if (statusObj == null && outputMap.containsKey("Payload")) {
+                    Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+                    if (payload != null) {
+                        statusObj = payload.get("status");
+                        log.info("📤 [CheckDeployment-Payload] Status found in Payload field: {}", statusObj);
+                    }
+                }
+
+                // ✅ CheckDeployment 상태 전체 로깅
+                log.info("📤 [CheckDeployment-Status-Check] statusObj: {}, outputMap: {}",
+                    statusObj, objectMapper.writeValueAsString(outputMap));
+
                 if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
                     log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
                     log.info("Deployment ready for traffic switch - deploymentId: {}", deploymentId);
@@ -489,15 +546,29 @@ public class StepFunctionsPollingService {
                     String blueServiceArn = null;
                     String greenServiceArn = null;
 
+                    // ✅ checkResult 처리 (Payload 내부 또는 top-level)
+                    Map<String, Object> checkResultSource = null;
                     if (outputMap.containsKey("checkResult")) {
-                        Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
-                        if (checkResult != null) {
-                            if (checkResult.containsKey("blueTargetGroupArn")) {
-                                blueServiceArn = (String) checkResult.get("blueTargetGroupArn");
-                            }
-                            if (checkResult.containsKey("greenTargetGroupArn")) {
-                                greenServiceArn = (String) checkResult.get("greenTargetGroupArn");
-                            }
+                        checkResultSource = (Map<String, Object>) outputMap.get("checkResult");
+                    } else if (outputMap.containsKey("Payload")) {
+                        Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+                        if (payload != null && payload.containsKey("checkResult")) {
+                            checkResultSource = (Map<String, Object>) payload.get("checkResult");
+                        }
+                    }
+
+                    if (checkResultSource != null) {
+                        log.info("📤 [CheckDeployment-CheckResult] checkResult details: {}",
+                            objectMapper.writeValueAsString(checkResultSource));
+                        if (checkResultSource.containsKey("blueTargetGroupArn")) {
+                            blueServiceArn = (String) checkResultSource.get("blueTargetGroupArn");
+                        }
+                        if (checkResultSource.containsKey("greenTargetGroupArn")) {
+                            greenServiceArn = (String) checkResultSource.get("greenTargetGroupArn");
+                        }
+                        if (checkResultSource.containsKey("deploymentStatus")) {
+                            log.info("📤 [CheckDeployment-DeploymentStatus] deploymentStatus: {}",
+                                checkResultSource.get("deploymentStatus"));
                         }
                     }
 
@@ -1020,20 +1091,47 @@ public class StepFunctionsPollingService {
                                 // ✅ CheckDeployment 완료 - WAITING_APPROVAL 상태 감지 및 stage 반환
                                 if (stageStatus != null && stageStatus.contains("CHECK_DEPLOYMENT")) {
                                     Object statusObj = outputMap.get("status");
+
+                                    // ✅ Payload 필드가 있는 경우 처리
+                                    if (statusObj == null && outputMap.containsKey("Payload")) {
+                                        Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+                                        if (payload != null) {
+                                            statusObj = payload.get("status");
+                                            log.info("📤 [CheckDeployment-Payload] Status found in Payload field: {}", statusObj);
+                                        }
+                                    }
+
+                                    // ✅ 전체 JSON 로깅
+                                    log.info("📤 [CheckDeployment-FULL-JSON] statusObj: {}, fullOutput: {}",
+                                        statusObj, objectMapper.writeValueAsString(outputMap));
+
                                     if (statusObj != null && "WAITING_APPROVAL".equals(statusObj.toString())) {
                                         log.info("📤 [AWS Step Functions] CheckDeployment output - Status: {}, Payload: {}", statusObj, objectMapper.writeValueAsString(outputMap));
                                         log.info("Deployment ready - extracting Blue/Green info for context");
 
-                                        // checkResult에서 Target Group ARN 추출
+                                        // ✅ checkResult에서 Target Group ARN 추출 (Payload 내부 또는 top-level)
+                                        Map<String, Object> checkResultSource = null;
                                         if (outputMap.containsKey("checkResult")) {
-                                            Map<String, Object> checkResult = (Map<String, Object>) outputMap.get("checkResult");
-                                            if (checkResult != null) {
-                                                if (checkResult.containsKey("blueTargetGroupArn")) {
-                                                    context.put("blueServiceArn", checkResult.get("blueTargetGroupArn"));
-                                                }
-                                                if (checkResult.containsKey("greenTargetGroupArn")) {
-                                                    context.put("greenServiceArn", checkResult.get("greenTargetGroupArn"));
-                                                }
+                                            checkResultSource = (Map<String, Object>) outputMap.get("checkResult");
+                                        } else if (outputMap.containsKey("Payload")) {
+                                            Map<String, Object> payload = (Map<String, Object>) outputMap.get("Payload");
+                                            if (payload != null && payload.containsKey("checkResult")) {
+                                                checkResultSource = (Map<String, Object>) payload.get("checkResult");
+                                            }
+                                        }
+
+                                        if (checkResultSource != null) {
+                                            log.info("📤 [CheckDeployment-CheckResult-Detail] {}",
+                                                objectMapper.writeValueAsString(checkResultSource));
+                                            if (checkResultSource.containsKey("blueTargetGroupArn")) {
+                                                context.put("blueServiceArn", checkResultSource.get("blueTargetGroupArn"));
+                                            }
+                                            if (checkResultSource.containsKey("greenTargetGroupArn")) {
+                                                context.put("greenServiceArn", checkResultSource.get("greenTargetGroupArn"));
+                                            }
+                                            if (checkResultSource.containsKey("deploymentStatus")) {
+                                                log.info("📤 [CheckDeployment-DeploymentStatus] deploymentStatus: {}",
+                                                    checkResultSource.get("deploymentStatus"));
                                             }
                                         }
 
