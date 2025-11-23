@@ -125,7 +125,15 @@ public class DeploymentEventStore {
         DeploymentEvent event = new DeploymentEvent();
         event.setType("stage");
         event.setMessage("[Stage 4] Green 서비스 배포 완료 - 트래픽 전환 대기 중");
-        event.setDetails(details != null ? details : Map.of("stage", 4));
+
+        // 통일된 형식: stage, timestamp는 항상 포함, 추가 details는 merge
+        Map<String, Object> unifiedDetails = new java.util.HashMap<>();
+        unifiedDetails.put("stage", 4);
+        unifiedDetails.put("timestamp", java.time.Instant.now().toString());
+        if (details != null) {
+            unifiedDetails.putAll(details);
+        }
+        event.setDetails(unifiedDetails);
 
         broadcastEvent(deploymentId, event);
 
@@ -133,11 +141,6 @@ public class DeploymentEventStore {
         saveDeploymentResult(deploymentId, "DEPLOYMENT_READY");
 
         log.info("Deployment ready event sent for deploymentId: {}", deploymentId);
-    }
-
-    // "fail" 이벤트 전송 (배포 실패)
-    public void sendErrorEvent(String deploymentId, String message) {
-        sendErrorEvent(deploymentId, message, null);
     }
 
     // "fail" 이벤트 전송 (배포 실패) - 상세정보 포함

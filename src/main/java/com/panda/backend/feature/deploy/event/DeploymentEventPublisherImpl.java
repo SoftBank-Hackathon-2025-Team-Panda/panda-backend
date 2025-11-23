@@ -28,7 +28,15 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
             DeploymentEvent event = new DeploymentEvent();
             event.setType("stage");
             event.setMessage(message);
-            event.setDetails(details != null ? details : Map.of("stage", stage));
+
+            // 통일된 형식: stage, timestamp는 항상 포함, 추가 details는 merge
+            Map<String, Object> unifiedDetails = new java.util.HashMap<>();
+            unifiedDetails.put("stage", stage);
+            unifiedDetails.put("timestamp", java.time.Instant.now().toString());
+            if (details != null) {
+                unifiedDetails.putAll(details);
+            }
+            event.setDetails(unifiedDetails);
 
             // 발행
             deploymentEventStore.broadcastEvent(deploymentId, event);
@@ -104,11 +112,13 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
             DeploymentEvent event = new DeploymentEvent();
             event.setType("stage");  // ✅ stage 타입으로 변경
             event.setMessage(message);
-            event.setDetails(Map.of(
-                "stage", stageNumber,
-                "stepFunctionsStage", stepFunctionsStage,
-                "timestamp", java.time.LocalDateTime.now().toString()
-            ));
+
+            // 통일된 형식: stage, timestamp는 항상 포함, stepFunctionsStage는 추가 정보
+            Map<String, Object> unifiedDetails = new java.util.HashMap<>();
+            unifiedDetails.put("stage", stageNumber);
+            unifiedDetails.put("timestamp", java.time.Instant.now().toString());
+            unifiedDetails.put("stepFunctionsStage", stepFunctionsStage);
+            event.setDetails(unifiedDetails);
 
             deploymentEventStore.broadcastEvent(deploymentId, event);
 
@@ -125,14 +135,15 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
      */
     private String mapStepFunctionsStageToMessage(String stage) {
         return switch (stage) {
-            case "ENSURE_INFRA_IN_PROGRESS" -> "인프라 점검 및 생성 진행 중...";
-            case "ENSURE_INFRA_COMPLETED" -> "인프라 점검 및 생성 완료";
-            case "REGISTER_TASK_IN_PROGRESS" -> "Task Definition 업데이트 및 배포 시작 중...";
-            case "REGISTER_TASK_COMPLETED" -> "Task Definition 업데이트 완료";
-            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> "Blue/Green 배포 진행 중...";
-            case "SUCCEEDED" -> "배포 성공! Green 서버 활성화됨";
-            case "FAILED" -> "배포 실패";
-            case "RUNNING" -> "배포 진행 중...";
+            case "ENSURE_INFRA_IN_PROGRESS" -> "Checking and provisioning infrastructure...";
+            case "ENSURE_INFRA_COMPLETED" -> "Infrastructure check and provisioning completed.";
+            case "REGISTER_TASK_IN_PROGRESS" -> "Updating Task Definition and starting deployment...";
+            case "REGISTER_TASK_COMPLETED" -> "Task Definition update completed.";
+            case "CHECK_DEPLOYMENT_IN_PROGRESS" -> "Blue/Green deployment in progress...";
+            case "DEPLOYMENT_READY" -> "Green environment is ready. Waiting for traffic switch approval.";
+            case "SUCCEEDED" -> "Deployment succeeded! Green environment is now active.";
+            case "FAILED" -> "Deployment failed.";
+            case "RUNNING" -> "Deployment running...";
             default -> stage;
         };
     }
@@ -147,9 +158,10 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
             case "REGISTER_TASK_IN_PROGRESS" -> 4;
             case "REGISTER_TASK_COMPLETED" -> 4;
             case "CHECK_DEPLOYMENT_IN_PROGRESS" -> 4;
+            case "DEPLOYMENT_READY" -> 4;
             case "SUCCEEDED" -> 4;
             case "FAILED" -> 4;
-            default -> 3;
+            default -> 4;
         };
     }
 

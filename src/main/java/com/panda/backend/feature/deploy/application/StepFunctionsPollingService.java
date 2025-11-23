@@ -121,7 +121,7 @@ public class StepFunctionsPollingService {
 
         // ✅ CheckDeployment 자동 완료용 타이머
         long checkDeploymentDetectedTime = -1;  // CheckDeployment 감지 시간
-        final long AUTO_WAIT_DURATION_MS = 3 * 60 * 1000;  // 3분
+        final long AUTO_WAIT_DURATION_MS = 2 * 60 * 1000 + 30 * 1000;  // 2분 30초
 
         // CloudWatch 모니터링용 컨텍스트
         Map<String, Object> monitoringContext = new HashMap<>();
@@ -241,20 +241,20 @@ public class StepFunctionsPollingService {
                     // ✅ CheckDeployment 감지 후 타이머 시작
                     if ("DEPLOYMENT_READY".equals(currentStage) && checkDeploymentDetectedTime == -1) {
                         checkDeploymentDetectedTime = System.currentTimeMillis();
-                        log.info("🔄 [AutoDeploy-3min] CheckDeployment 감지! 3분 자동 대기 시작 - deploymentId: {}", deploymentId);
+                        log.info("🔄 [AutoDeploy-2m30s] CheckDeployment 감지! 2분 30초 자동 대기 시작 - deploymentId: {}", deploymentId);
                     }
 
-                    // ✅ CheckDeployment 감지 후 3분 경과 확인
+                    // ✅ CheckDeployment 감지 후 2분 30초 경과 확인
                     if ("DEPLOYMENT_READY".equals(currentStage) && checkDeploymentDetectedTime != -1) {
                         long elapsedMs = System.currentTimeMillis() - checkDeploymentDetectedTime;
                         long remainingMs = AUTO_WAIT_DURATION_MS - elapsedMs;
 
-                        log.info("⏳ [AutoDeploy-3min-Countdown] CheckDeployment 감지 후 경과: {}ms/{}, 남은 시간: {}초",
+                        log.info("⏳ [AutoDeploy-2m30s-Countdown] CheckDeployment 감지 후 경과: {}ms/{}, 남은 시간: {}초",
                             elapsedMs, AUTO_WAIT_DURATION_MS, remainingMs / 1000);
 
-                        // 3분이 지났으면 자동 완료
+                        // 2분 30초가 지났으면 자동 완료
                         if (elapsedMs >= AUTO_WAIT_DURATION_MS) {
-                            log.info("✅ [AutoDeploy-3min-Complete] 3분 경과! 자동으로 DEPLOYMENT_READY 상태로 저장 - deploymentId: {}", deploymentId);
+                            log.info("✅ [AutoDeploy-2m30s-Complete] 2분 30초 경과! 자동으로 DEPLOYMENT_READY 상태로 저장 - deploymentId: {}", deploymentId);
 
                             // ✅ 1. Success 이벤트 먼저 발행
                             deploymentEventStore.sendConnectedEvent(deploymentId);
