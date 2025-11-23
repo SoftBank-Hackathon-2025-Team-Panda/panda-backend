@@ -140,7 +140,7 @@ public class DeploymentEventPublisherImpl implements DeploymentEventPublisher {
             case "REGISTER_TASK_IN_PROGRESS" -> "Updating Task Definition and starting deployment...";
             case "REGISTER_TASK_COMPLETED" -> "Task Definition update completed.";
             case "CHECK_DEPLOYMENT_IN_PROGRESS" -> "Blue/Green deployment in progress...";
-            case "DEPLOYMENT_READY" -> "Green environment is ready. Waiting for traffic switch approval.";
+            case "DEPLOYMENT_READY" -> "Green environment is being prepared. This may take a few minutes.";
             case "SUCCEEDED" -> "Deployment succeeded! Green environment is now active.";
             case "FAILED" -> "Deployment failed.";
             case "RUNNING" -> "Deployment running...";

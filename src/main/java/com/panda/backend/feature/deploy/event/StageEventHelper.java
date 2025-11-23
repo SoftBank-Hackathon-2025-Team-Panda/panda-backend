@@ -30,31 +30,31 @@ public class StageEventHelper {
      * Stage 1: Dockerfile 탐색 및 Docker Build
      */
     public void stage1Start() {
-        updateStage(1, "Repository 클론 중...");
+        updateStage(1, "Cloning repository...");
     }
 
     public void stage1RepositoryCloned(String clonePath) {
-        publishProgress("Repository 클론 완료", Map.of("path", clonePath));
+        publishProgress("Repository cloned successfully", Map.of("path", clonePath));
     }
 
     public void stage1DockerfileSearching() {
-        publishProgress("Dockerfile 검색 중...");
+        publishProgress("Searching for Dockerfile...");
     }
 
     public void stage1DockerfileFound(String dockerfilePath) {
-        publishProgress("Dockerfile 찾음", Map.of("path", dockerfilePath));
+        publishProgress("Dockerfile found", Map.of("path", dockerfilePath));
     }
 
     public void stage1BuildStarting() {
-        publishProgress("Docker 이미지 빌드 시작...");
+        publishProgress("Starting Docker image build...");
     }
 
     public void stage1BuildProgress(String message) {
-        publishProgress("Docker 빌드 진행 중: " + message);
+        publishProgress("Docker build in progress: " + message);
     }
 
     public void stage1BuildCompleted(String imageName) {
-        publishProgress("Docker 이미지 빌드 완료", Map.of(
+        publishProgress("Docker image build completed", Map.of(
                 "imageName", imageName
         ));
     }
@@ -63,70 +63,70 @@ public class StageEventHelper {
      * Stage 2: ECR Push
      */
     public void stage2Start() {
-        updateStage(2, "ECR로 이미지 Push 중...");
+        updateStage(2, "Pushing image to ECR...");
     }
 
     public void stage2RepositoryEnsured(String repositoryName) {
-        publishProgress("ECR 리포지토리 확인 완료", Map.of("repository", repositoryName));
+        publishProgress("ECR repository verification completed", Map.of("repository", repositoryName));
     }
 
     public void stage2LoginStarting() {
-        publishProgress("ECR 로그인 중...");
+        publishProgress("Logging in to ECR...");
     }
 
     public void stage2LoginCompleted() {
-        publishProgress("ECR 로그인 완료");
+        publishProgress("ECR login completed");
     }
 
     public void stage2PushStarting(String ecrImageUri) {
-        publishProgress("이미지 Push 시작", Map.of("uri", ecrImageUri));
+        publishProgress("Starting image push", Map.of("uri", ecrImageUri));
     }
 
     public void stage2PushProgress(String message) {
-        publishProgress("Push 진행 중: " + message);
+        publishProgress("Push in progress: " + message);
     }
 
     public void stage2PushCompleted(String ecrImageUri) {
-        publishProgress("이미지 Push 완료", Map.of("uri", ecrImageUri));
+        publishProgress("Image push completed", Map.of("uri", ecrImageUri));
     }
 
     /**
      * Stage 3: ECS 배포 시작
      */
     public void stage3Start(String ecrImageUri) {
-        updateStage(3, "ECS 배포 시작");
-        publishProgress("ECS 서비스 생성/업데이트 중", Map.of("image", ecrImageUri));
+        updateStage(3, "Checking and provisioning infrastructure...");
+        publishProgress("Creating/updating ECS service...", Map.of("image", ecrImageUri));
     }
 
     public void stage3ServiceCreated(String serviceName, String clusterName) {
-        publishProgress("ECS 서비스 생성 완료", Map.of(
+        publishProgress("Infrastructure check and provisioning completed.", Map.of(
                 "serviceName", serviceName,
                 "clusterName", clusterName
         ));
     }
 
     public void stage3ServiceUpdated(String serviceName) {
-        publishProgress("ECS 서비스 업데이트 완료", Map.of("serviceName", serviceName));
+        publishProgress("Infrastructure check and provisioning completed.", Map.of("serviceName", serviceName));
     }
 
     /**
      * Stage 4: CodeDeploy Blue/Green Lifecycle
      */
     public void stage4Start(String ecrImageUri) {
-        updateStage(4, "CodeDeploy Blue/Green 배포 시작");
-        publishProgress("Blue/Green 배포 초기화 중", Map.of("image", ecrImageUri));
+        updateStage(4, "Updating Task Definition and starting deployment...");
+        publishProgress("Initializing Blue/Green deployment...", Map.of("image", ecrImageUri));
     }
 
     public void stage4BlueServiceRunning(String blueUrl) {
-        publishProgress("Blue 서비스 실행 중", Map.of("url", blueUrl));
+        publishProgress("Blue service running", Map.of("url", blueUrl));
     }
 
     public void stage4GreenServiceSpinning(String greenUrl) {
-        publishProgress("Green 서비스 시작 중", Map.of("url", greenUrl));
+        publishProgress("Green service starting...", Map.of("url", greenUrl));
     }
 
     public void stage4GreenServiceReady(String greenUrl) {
-        publishProgress("Green 서비스 준비 완료", Map.of("url", greenUrl));
+        publishProgress("Green service ready", Map.of("url", greenUrl));
     }
 
     public void stage4LifecycleHook(String hookName) {
@@ -134,38 +134,38 @@ public class StageEventHelper {
     }
 
     public void stage4HealthCheckRunning(String greenUrl) {
-        publishProgress("Green 서비스 HealthCheck 진행 중", Map.of("url", greenUrl));
+        publishProgress("Blue/Green deployment in progress...", Map.of("url", greenUrl));
     }
 
     public void stage4HealthCheckPassed(String greenUrl, int passedChecks) {
-        publishProgress("HealthCheck 성공", Map.of(
+        publishProgress("Health check passed", Map.of(
                 "url", greenUrl,
                 "passedChecks", passedChecks
         ));
     }
 
     public void stage4TrafficSwitching(String fromService, String toService) {
-        publishProgress("트래픽 전환 중", Map.of(
+        publishProgress("Switching traffic...", Map.of(
                 "from", fromService,
                 "to", toService
         ));
     }
 
     public void stage4TrafficSwitched(String toService) {
-        publishProgress("트래픽 전환 완료", Map.of("activeService", toService));
+        publishProgress("Traffic switched successfully", Map.of("activeService", toService));
     }
 
     public void stage4HealthCheckFailed(String greenUrl, String reason) {
-        publishProgress("HealthCheck 실패: " + reason, Map.of("url", greenUrl));
+        publishProgress("Health check failed: " + reason, Map.of("url", greenUrl));
     }
 
     public void stage4DeploymentReady(String blueServiceArn, String greenServiceArn, String blueUrl, String greenUrl) {
-        publishProgress("Green 서비스 배포 완료 - 트래픽 전환 대기 중", Map.of(
+        publishProgress("Green environment is being prepared. This may take a few minutes.", Map.of(
                 "blueServiceArn", blueServiceArn,
                 "greenServiceArn", greenServiceArn,
                 "blueUrl", blueUrl,
                 "greenUrl", greenUrl,
-                "message", "POST /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요"
+                "message", "Call POST /api/v1/deploy/{deploymentId}/switch to proceed with traffic switch"
         ));
     }
 
