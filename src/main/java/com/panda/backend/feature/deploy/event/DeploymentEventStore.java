@@ -24,14 +24,23 @@ public class DeploymentEventStore {
     // 새로운 SSE 클라이언트 연결 등록
     public SseEmitter registerEmitter(String deploymentId) {
 
-        SseEmitter emitter = new SseEmitter(300000L); // 5분 타임아웃
+        SseEmitter emitter = new SseEmitter(600000L); // 10분 타임아웃 (5분 -> 10분으로 증가)
 
         emitterMap.computeIfAbsent(deploymentId, k -> Collections.synchronizedList(new ArrayList<>()))
                 .add(emitter);
 
-        emitter.onCompletion(() -> removeEmitter(deploymentId, emitter));
-        emitter.onTimeout(() -> removeEmitter(deploymentId, emitter));
-        emitter.onError((throwable) -> removeEmitter(deploymentId, emitter));
+        emitter.onCompletion(() -> {
+            removeEmitter(deploymentId, emitter);
+            stopKeepalive(deploymentId);
+        });
+        emitter.onTimeout(() -> {
+            removeEmitter(deploymentId, emitter);
+            stopKeepalive(deploymentId);
+        });
+        emitter.onError((throwable) -> {
+            removeEmitter(deploymentId, emitter);
+            stopKeepalive(deploymentId);
+        });
 
         log.info("SSE emitter registered for deployment: {}", deploymentId);
         return emitter;
@@ -65,7 +74,7 @@ public class DeploymentEventStore {
                     SseEmitter.SseEventBuilder eventBuilder = SseEmitter.event()
                             .id(UUID.randomUUID().toString())
                             .name(eventType)
-                            .reconnectTime(5000);
+                            .reconnectTime(3000);  // 재연결 시간 단축 (5초 -> 3초)
 
                     // 모든 이벤트 타입에 전체 데이터 전송 (stage, success, fail 모두)
                     if ("stage".equals(eventType) || "success".equals(eventType) || "fail".equals(eventType)) {
@@ -168,6 +177,9 @@ public class DeploymentEventStore {
 
     // 모든 SSE 클라이언트 연결 종료
     public void closeAllEmitters(String deploymentId) {
+        // Keepalive 중지
+        stopKeepalive(deploymentId);
+
         List<SseEmitter> emitters = emitterMap.remove(deploymentId);
         if (emitters != null) {
             for (SseEmitter emitter : emitters) {
@@ -207,7 +219,7 @@ public class DeploymentEventStore {
                     emitter.send(SseEmitter.event()
                             .id(UUID.randomUUID().toString())
                             .name("connected")
-                            .reconnectTime(5000)
+                            .reconnectTime(3000)
                             .data(Map.of("message", "SSE connection active")));
                 } catch (IOException e) {
                     log.warn("Failed to send connected event to emitter for deployment: {}", deploymentId, e);
@@ -219,6 +231,81 @@ public class DeploymentEventStore {
             for (SseEmitter failedEmitter : failedEmitters) {
                 removeEmitter(deploymentId, failedEmitter);
             }
+        }
+    }
+
+    // Keepalive 시작 (주기적으로 주석 이벤트 전송하여 연결 유지)
+    public void startKeepalive(String deploymentId) {
+        // 이미 keepalive가 실행 중이면 중복 시작 방지
+        if (keepaliveThreadMap.containsKey(deploymentId)) {
+            Thread existingThread = keepaliveThreadMap.get(deploymentId);
+            if (existingThread != null && existingThread.isAlive()) {
+                log.debug("Keepalive already running for deployment: {}", deploymentId);
+                return;
+            }
+        }
+
+        Thread keepaliveThread = new Thread(() -> {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    Thread.sleep(30000); // 30초마다 keepalive 전송
+
+                    List<SseEmitter> emitters = emitterMap.get(deploymentId);
+                    if (emitters == null || emitters.isEmpty()) {
+                        log.debug("No emitters found for deployment: {}, stopping keepalive", deploymentId);
+                        break;
+                    }
+
+                    List<SseEmitter> failedEmitters = new ArrayList<>();
+
+                    for (SseEmitter emitter : emitters) {
+                        try {
+                            // 주석 이벤트로 keepalive 전송 (프록시/로드밸런서가 연결을 끊지 않도록)
+                            emitter.send(SseEmitter.event()
+                                    .id(UUID.randomUUID().toString())
+                                    .comment("keepalive")  // 주석 이벤트는 클라이언트에서 무시됨
+                                    .reconnectTime(3000));
+                        } catch (IOException e) {
+                            log.debug("Failed to send keepalive to emitter for deployment: {}", deploymentId, e);
+                            failedEmitters.add(emitter);
+                        }
+                    }
+
+                    // 실패한 emitter 제거
+                    for (SseEmitter failedEmitter : failedEmitters) {
+                        removeEmitter(deploymentId, failedEmitter);
+                    }
+
+                    // 모든 emitter가 제거되면 keepalive 종료
+                    if (emitters.isEmpty() || (emitters.size() == failedEmitters.size())) {
+                        log.debug("All emitters removed for deployment: {}, stopping keepalive", deploymentId);
+                        break;
+                    }
+                }
+            } catch (InterruptedException e) {
+                log.debug("Keepalive thread interrupted for deployment: {}", deploymentId);
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log.error("Error in keepalive thread for deployment: {}", deploymentId, e);
+            } finally {
+                keepaliveThreadMap.remove(deploymentId);
+                log.debug("Keepalive thread stopped for deployment: {}", deploymentId);
+            }
+        });
+
+        keepaliveThread.setDaemon(true);
+        keepaliveThread.setName("SSE-Keepalive-" + deploymentId);
+        keepaliveThread.start();
+        keepaliveThreadMap.put(deploymentId, keepaliveThread);
+        log.info("Keepalive started for deployment: {}", deploymentId);
+    }
+
+    // Keepalive 중지
+    public void stopKeepalive(String deploymentId) {
+        Thread keepaliveThread = keepaliveThreadMap.remove(deploymentId);
+        if (keepaliveThread != null && keepaliveThread.isAlive()) {
+            keepaliveThread.interrupt();
+            log.debug("Keepalive stopped for deployment: {}", deploymentId);
         }
     }
 

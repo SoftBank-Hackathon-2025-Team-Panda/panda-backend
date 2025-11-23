@@ -2,13 +2,13 @@ package com.panda.backend.feature.deploy.application;
 
 import com.panda.backend.feature.deploy.event.DeploymentEvent;
 import com.panda.backend.feature.deploy.event.DeploymentEventStore;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -23,26 +23,20 @@ public class StreamDeploymentEventsService {
         // Emitter 등록
         SseEmitter emitter = deploymentEventStore.registerEmitter(deploymentId);
 
-        // ✅ 1~2초 딜레이 후 connected 이벤트 전송 (비동기)
-        new Thread(() -> {
-            try {
-                Thread.sleep(1500);  // 1.5초 딜레이
+        try {
+            emitter.send(SseEmitter.event()
+                    .id(UUID.randomUUID().toString())
+                    .name("connected")
+                    .reconnectTime(3000)  // 재연결 시간 단축 (5초 -> 3초)
+                    .data(Map.of("message", "SSE connection established")));
 
-                // 연결 확립 신호 전송 (클라이언트가 즉시 SSE 연결 확인 가능)
-                emitter.send(SseEmitter.event()
-                        .id(UUID.randomUUID().toString())
-                        .name("connected")
-                        .reconnectTime(5000)
-                        .data(Map.of("message", "SSE connection established")));
+            log.info("Connected event sent immediately for deployment: {}", deploymentId);
+        } catch (IOException e) {
+            log.warn("Failed to send connected event for deployment: {}", deploymentId, e);
+        }
 
-                log.info("Connected event sent for deployment: {} (after 1.5s delay)", deploymentId);
-            } catch (IOException e) {
-                log.warn("Failed to send connected event for deployment: {}", deploymentId, e);
-            } catch (InterruptedException e) {
-                log.warn("Thread interrupted while waiting to send connected event for deployment: {}", deploymentId, e);
-                Thread.currentThread().interrupt();
-            }
-        }).start();
+        // Keepalive 시작
+        deploymentEventStore.startKeepalive(deploymentId);
 
         return emitter;
     }
@@ -53,7 +47,7 @@ public class StreamDeploymentEventsService {
         SseEmitter.SseEventBuilder builder = SseEmitter.event()
                 .id(UUID.randomUUID().toString())
                 .name(eventType)
-                .reconnectTime(5000);
+                .reconnectTime(3000);  // 재연결 시간 단축 (5초 -> 3초)
 
         // Event 타입에 따라 데이터 설정
         if ("stage".equals(eventType)) {

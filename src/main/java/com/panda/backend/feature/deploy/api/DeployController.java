@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import jakarta.servlet.http.HttpServletResponse;
 import java.util.Map;
 
 @Slf4j
@@ -46,8 +47,15 @@ public class DeployController implements DeployApi {
 
     @Override
     @GetMapping(value = "/api/v1/deploy/{deploymentId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter streamEvents(@PathVariable String deploymentId) {
+    public SseEmitter streamEvents(@PathVariable String deploymentId, HttpServletResponse response) {
         log.info("SSE client connected for deployment: {}", deploymentId);
+
+        response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Expires", "0");
+        response.setHeader("X-Accel-Buffering", "no"); // Nginx 프록시 버퍼링 방지
+        response.setHeader("Connection", "keep-alive");
+
         return streamDeploymentEventsService.stream(deploymentId);
     }
 

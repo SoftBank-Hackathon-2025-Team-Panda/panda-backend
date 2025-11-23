@@ -13,6 +13,8 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 @Tag(name = "Deployment", description = "배포 파이프라인 관리 (필수 3개 API)")
 public interface DeployApi {
 
@@ -30,7 +32,7 @@ public interface DeployApi {
         description = "배포 진행 상황을 Stage별로 실시간 스트리밍합니다. " +
                      "과거 이벤트 히스토리도 자동으로 전송되어 중간에 접속한 클라이언트도 진행 상황을 파악할 수 있습니다."
     )
-    SseEmitter streamEvents(@PathVariable String deploymentId);
+    SseEmitter streamEvents(@PathVariable String deploymentId, HttpServletResponse response);
 
     @PostMapping("/api/v1/deploy/{deploymentId}/switch")
     @Operation(
