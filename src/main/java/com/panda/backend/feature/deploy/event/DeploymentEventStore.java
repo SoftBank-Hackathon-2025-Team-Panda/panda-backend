@@ -124,7 +124,7 @@ public class DeploymentEventStore {
 
         DeploymentEvent event = new DeploymentEvent();
         event.setType("stage");
-        event.setMessage("[Stage 4] Green 서비스 배포 완료 - 트래픽 전환 대기 중");
+        event.setMessage("Green environment is being prepared. This may take a few minutes.");
 
         // 통일된 형식: stage, timestamp는 항상 포함, 추가 details는 merge
         Map<String, Object> unifiedDetails = new java.util.HashMap<>();
@@ -149,16 +149,13 @@ public class DeploymentEventStore {
         event.setType("fail");
         event.setMessage(message);
 
-        // 상세정보 설정
+        // 통일된 형식: stage, stepFunctionsStage, timestamp는 항상 포함
+        Map<String, Object> unifiedDetails = new java.util.HashMap<>();
+        unifiedDetails.put("timestamp", java.time.Instant.now().toString());
         if (errorDetails != null) {
-            event.setDetails(errorDetails);
-        } else {
-            // 기본 상세정보 설정
-            event.setDetails(Map.of(
-                "message", message,
-                "timestamp", java.time.LocalDateTime.now().toString()
-            ));
+            unifiedDetails.putAll(errorDetails);  // stage, stepFunctionsStage 포함
         }
+        event.setDetails(unifiedDetails);
 
         log.info("📤 [Error Event] type: fail, message: {}, details: {}", message, event.getDetails());
 

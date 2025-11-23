@@ -196,15 +196,13 @@ public class StageEventHelper {
     }
 
     private void publishProgress(String message, Map<String, Object> details) {
-        String fullMessage = String.format("[Stage %d] %s", currentStage, message);
-
         if (details != null) {
-            eventPublisher.publishStageEvent(deploymentId, currentStage, fullMessage, details);
+            eventPublisher.publishStageEvent(deploymentId, currentStage, message, details);
         } else {
-            eventPublisher.publishStageEvent(deploymentId, currentStage, fullMessage);
+            eventPublisher.publishStageEvent(deploymentId, currentStage, message);
         }
 
-        log.debug("Stage progress - deploymentId: {}, stage: {}, message: {}", deploymentId, currentStage, fullMessage);
+        log.debug("Stage progress - deploymentId: {}, stage: {}, message: {}", deploymentId, currentStage, message);
     }
 
     /**

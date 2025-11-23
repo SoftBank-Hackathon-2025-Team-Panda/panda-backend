@@ -424,14 +424,15 @@ public class StepFunctionsPollingService {
                 // ExecutionFailed 체크
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionFailed")) {
                     log.warn("Execution failed for deploymentId: {}", deploymentId);
-                    publishStageEvent(deploymentId, 6, "배포 실패");
+                    eventPublisher.publishErrorEvent(deploymentId, "Deployment failed.",
+                        Map.of("stage", 4, "stepFunctionsStage", "FAILED"));
                     return "FAILED";
                 }
 
                 // ExecutionSucceeded 체크
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionSucceeded")) {
                     log.info("Execution succeeded for deploymentId: {}", deploymentId);
-                    publishStageEvent(deploymentId, 6, "배포 완료", Map.of("finalService", "green"));
+                    publishStageEvent(deploymentId, 4, "Deployment succeeded! Green environment is now active.", Map.of("finalService", "green"));
                     return "SUCCEEDED";
                 }
 
@@ -480,7 +481,7 @@ public class StepFunctionsPollingService {
             // Stage 3: EnsureInfra
             if ("EnsureInfra".equals(taskName)) {
                 log.info("📤 [AWS Step Functions] TaskStateEntered - Task: {}", taskName);
-                publishStageEvent(deploymentId, 3, "ECS 배포 시작 중",
+                publishStageEvent(deploymentId, 3, "Checking and provisioning infrastructure...",
                     Map.of("stage", 3));
                 return "ENSURE_INFRA_IN_PROGRESS";
             }
@@ -488,7 +489,7 @@ public class StepFunctionsPollingService {
             // Stage 4: RegisterTaskAndDeploy (CodeDeploy Blue/Green)
             if ("RegisterTaskAndDeploy".equals(taskName)) {
                 log.info("📤 [AWS Step Functions] TaskStateEntered - Task: {}", taskName);
-                publishStageEvent(deploymentId, 4, "CodeDeploy Blue/Green 배포 시작",
+                publishStageEvent(deploymentId, 4, "Updating Task Definition and starting deployment...",
                     Map.of("stage", 4));
                 return "REGISTER_TASK_IN_PROGRESS";
             }
@@ -528,7 +529,7 @@ public class StepFunctionsPollingService {
             // -------------------------
             if ("EnsureInfra".equals(taskName)) {
                 Map<String, Object> details = extractEnsureInfraDetails(outputMap);
-                publishStageEvent(deploymentId, 3, "ECS 배포 완료", details);
+                publishStageEvent(deploymentId, 3, "Infrastructure check and provisioning completed.", details);
                 return "ENSURE_INFRA_COMPLETED";
             }
 
@@ -551,7 +552,7 @@ public class StepFunctionsPollingService {
                     }
                 } catch (Exception ignored) {}
 
-                publishStageEvent(deploymentId, 4, "CodeDeploy Blue/Green 배포 진행 중", details);
+                publishStageEvent(deploymentId, 4, "Blue/Green deployment in progress...", details);
                 return "REGISTER_TASK_COMPLETED";
             }
 
@@ -873,12 +874,12 @@ public class StepFunctionsPollingService {
 
         // Blue 서비스 상태 발행
         if (blueUrl != null) {
-            publishStageEvent(deploymentId, 4, "Blue 서비스 실행 중", Map.of("url", blueUrl));
+            publishStageEvent(deploymentId, 4, "Task Definition update completed.", Map.of("url", blueUrl));
         }
 
         // Green 서비스 상태 발행
         if (greenUrl != null) {
-            publishStageEvent(deploymentId, 4, "Green 서비스 준비 완료", Map.of("url", greenUrl));
+            publishStageEvent(deploymentId, 4, "Task Definition update completed.", Map.of("url", greenUrl));
         }
 
         details.put("stage", 4);
@@ -1063,8 +1064,7 @@ public class StepFunctionsPollingService {
         try {
             // ✅ Stage event 발행 전 0.5초 delay
             Thread.sleep(500);
-            eventPublisher.publishStageEvent(deploymentId, stage,
-                String.format("[Stage %d] %s", stage, message), details);
+            eventPublisher.publishStageEvent(deploymentId, stage, message, details);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.debug("Stage event publishing interrupted", e);
@@ -1185,7 +1185,8 @@ public class StepFunctionsPollingService {
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionFailed")) {
                     log.info("📤 [AWS Step Functions] ExecutionFailed - Event ID: {}", event.id());
                     log.warn("Execution failed for deploymentId: {}", deploymentId);
-                    publishStageEvent(deploymentId, 4, "배포 실패");  // ✅ Stage 4까지만 사용
+                    eventPublisher.publishErrorEvent(deploymentId, "Deployment failed.",  // ✅ Stage 4까지만 사용
+                        Map.of("stage", 4, "stepFunctionsStage", "FAILED"));
                     return new PollingResult("FAILED", maxEventId);  // ✅ PollingResult 반환
                 }
 
@@ -1193,7 +1194,7 @@ public class StepFunctionsPollingService {
                 if (event.typeAsString() != null && event.typeAsString().equals("ExecutionSucceeded")) {
                     log.info("📤 [AWS Step Functions] ExecutionSucceeded - Event ID: {}", event.id());
                     log.info("Execution succeeded for deploymentId: {}", deploymentId);
-                    publishStageEvent(deploymentId, 4, "배포 완료", Map.of("finalService", "green"));  // ✅ Stage 4까지만 사용
+                    publishStageEvent(deploymentId, 4, "Deployment succeeded! Green environment is now active.", Map.of("finalService", "green"));  // ✅ Stage 4까지만 사용
                     return new PollingResult("SUCCEEDED", maxEventId);  // ✅ PollingResult 반환
                 }
 
