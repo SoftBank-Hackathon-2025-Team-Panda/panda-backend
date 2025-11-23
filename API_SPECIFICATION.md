@@ -471,14 +471,15 @@ Content-Type: application/json
 ```
 
 ### 배포 단계 (내부)
-1. **Stage 1**: Dockerfile 탐색 및 Docker Build
-2. **Stage 2**: ECR로 이미지 Push
-3. **Stage 3**: ECS 배포 시작
-4. **Stage 4**: CodeDeploy Blue/Green Lifecycle (배포 자동 완료, 수동 전환 대기)
+1. **Stage 1**: Repository Clone, Dockerfile Search, Docker Build
+2. **Stage 2**: ECR Repository Setup, ECR Login, Image Push
+3. **Stage 3**: Infrastructure Provisioning (ECS Service)
+4. **Stage 4**: CodeDeploy Blue/Green Lifecycle (자동 배포 후 2분 30초 대기, 자동 완료)
 
 ### 타임아웃
 - 전체 배포: 30분
 - 단계별: 10분
+- DEPLOYMENT_READY 자동 완료: 2분 30초 (Stage 4 완료 후)
 
 ### 가능한 에러
 | 에러 메시지 | 원인 | 해결 방법 |
@@ -535,18 +536,19 @@ reconnect: 5000
 
 #### 이벤트 타입
 
-##### 1. Connected 이벤트 (SSE 연결 확립)
+##### 1. Connected 이벤트 (SSE 연결 확립 & 유지)
 ```
 event: connected
 data: {
-  "message": "SSE connection established"
+  "message": "SSE connection established" 또는 "SSE connection active"
 }
 ```
 
-**설명**: SSE 연결이 성공적으로 확립되었음을 알립니다.
-- 클라이언트가 연결 요청 직후 가장 먼저 받는 이벤트
-- 이 이벤트를 받으면 SSE 연결이 안정적으로 이루어졌음을 확인
-- 이후 배포 관련 이벤트들이 스트리밍됨
+**설명**: SSE 연결 상태를 알립니다.
+- `"SSE connection established"`: 클라이언트가 연결 요청 직후 가장 먼저 받는 이벤트
+- `"SSE connection active"`: Stage 이벤트 발행 전에 주기적으로 전송 (연결 활성 상태 확인)
+- 이 이벤트들을 받으면 SSE 연결이 안정적으로 이루어짐을 확인
+- 이후 배포 관련 Stage/Success/Fail 이벤트들이 스트리밍됨
 
 **예제**:
 ```
@@ -556,14 +558,22 @@ data: {"message":"SSE connection established"}
 reconnect: 5000
 ```
 
+```
+id: 550e8400-e29b-41d4-a716-446655440002
+event: connected
+data: {"message":"SSE connection active"}
+reconnect: 5000
+```
+
 ##### 2. Stage 이벤트 (배포 진행)
 ```
 event: stage
 data: {
   "type": "stage",
-  "message": "[Stage 1] Dockerfile 탐색 및 Docker Build - Repository 클론 중...",
+  "message": "Cloning repository...",
   "details": {
     "stage": 1,
+    "timestamp": "2025-11-23T02:30:10.047820483Z",
     ...
   }
 }
@@ -571,13 +581,14 @@ data: {
 
 **설명**: 배포의 각 Stage에서 진행 상황을 전송합니다.
 - 각 Stage 시작, 진행, 완료 시마다 이벤트 발생
-- 세부 정보는 `details` 필드에 포함
+- 세부 정보는 `details` 필드에 포함 (항상 stage, timestamp 포함)
+- 모든 메시지는 영어로 통일됨
 
 **예제**:
 ```
 id: 550e8400-e29b-41d4-a716-446655440000
 event: stage
-data: {"type":"stage","message":"[Stage 1] Dockerfile 탐색 및 Docker Build - Repository 클론 중...","details":{"stage":1}}
+data: {"type":"stage","message":"Repository cloned successfully","details":{"stage":1,"timestamp":"2025-11-23T02:30:10.047820483Z","path":"/tmp/deployment_..."}}
 reconnect: 5000
 ```
 
@@ -585,19 +596,26 @@ reconnect: 5000
 ```
 event: success
 data: {
-  "message": "Deployment completed successfully"
+  "type": "success",
+  "message": "Deployment succeeded! Green environment is now active.",
+  "details": {
+    "stage": 4,
+    "timestamp": "2025-11-23T02:33:50.047820483Z",
+    "finalService": "green"
+  }
 }
 ```
 
 **설명**: 배포가 성공적으로 완료됨을 알립니다.
 - 이 이벤트 이후 5초 뒤 SSE 연결 자동 종료
 - 클라이언트는 `eventSource.close()` 호출 필요
+- details에 최종 상태 정보 포함
 
 **예제**:
 ```
 id: 550e8400-e29b-41d4-a716-446655440050
 event: success
-data: {"message":"Deployment completed successfully"}
+data: {"type":"success","message":"Deployment succeeded! Green environment is now active.","details":{"stage":4,"timestamp":"2025-11-23T02:33:50.047820483Z","finalService":"green"}}
 reconnect: 5000
 ```
 
@@ -605,35 +623,44 @@ reconnect: 5000
 ```
 event: fail
 data: {
-  "message": "Deployment failed: Docker build failed: ..."
+  "type": "fail",
+  "message": "Deployment failed.",
+  "details": {
+    "stage": 4,
+    "stepFunctionsStage": "FAILED",
+    "timestamp": "2025-11-23T02:30:10.047820483Z"
+  }
 }
 ```
 
 **설명**: 배포 중 예외 발생을 알립니다.
 - 이 이벤트 이후 5초 뒤 SSE 연결 자동 종료
 - 클라이언트는 `eventSource.close()` 호출 필요
+- details에는 항상 stage, stepFunctionsStage, timestamp 포함
 
 **예제**:
 ```
 id: 550e8400-e29b-41d4-a716-446655440051
 event: fail
-data: {"message":"Deployment timed out at Stage 1 after 605 seconds"}
+data: {"type":"fail","message":"Deployment failed.","details":{"stage":4,"stepFunctionsStage":"FAILED","timestamp":"2025-11-23T02:30:10.047820483Z"}}
 reconnect: 5000
 ```
 
 ### 연결 특성
 - **연결 유지**: 배포 완료 또는 실패 후 5초
-- **자동 재연결**: 크롬은 자동으로 재연결 시도 (3초 간격)
+- **자동 재연결**: 브라우저는 자동으로 재연결 시도 (3초 간격)
+- **Keepalive**: 30초마다 keepalive 이벤트 전송 (프록시 연결 유지)
 - **타임아웃**: 5분 (서버 측)
-
-
 
 ### 주의사항
 - **연결 확인**: Connected 이벤트를 받으면 SSE 연결이 안정적으로 이루어짐을 확인
-- **이벤트 순서**: Connected → (Stage 이벤트들...) → Success/Fail
+- **이벤트 순서**: Connected → Connected (Active) → (Stage 이벤트들...) → Success/Fail
+- **이벤트 형식**: 모든 Stage 이벤트는 `type: "stage"`, 실패 이벤트는 `type: "fail"` 사용
+- **타임스탬프**: 모든 이벤트 details에 ISO8601 타임스탬프 포함
 - **연결 유지**: SSE 연결은 Success/Fail 이벤트 발행 후 5초 경과 시 자동 종료
 - **히스토리**: 신규 클라이언트가 연결하면 Connected 이후 과거 배포 이벤트 자동 전송
 - **순서 보장**: 이벤트는 발생 순서대로 전송됨
+- **자동 완료**: Stage 4 완료 후 2분 30초 자동 대기 (수동 전환 가능)
 
 ---
 
@@ -670,7 +697,8 @@ Content-Type: application/json
   "data": {
     "deploymentId": "dep_k1l2m3n4o5",
     "message": "Traffic switching from blue to green in progress",
-    "activeService": "green"
+    "activeService": "green",
+    "switchStatus": "IN_PROGRESS"
   }
 }
 ```
@@ -683,6 +711,7 @@ Content-Type: application/json
 | **data.deploymentId** | String | 배포 ID |
 | **data.message** | String | 전환 상태 메시지 |
 | **data.activeService** | String | 활성 서비스 (`green`) |
+| **data.switchStatus** | String | 전환 상태 (`IN_PROGRESS`, `COMPLETED` 등) |
 
 #### 실패 - 이미 전환됨 (400)
 ```json
@@ -887,9 +916,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 1] Dockerfile 탐색 및 Docker Build - Repository 클론 중...",
+  "message": "Cloning repository...",
   "details": {
-    "stage": 1
+    "stage": 1,
+    "timestamp": "2025-11-23T02:30:10.047820483Z"
   }
 }
 ```
@@ -898,9 +928,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 1] Repository 클론 완료",
+  "message": "Repository cloned successfully",
   "details": {
     "stage": 1,
+    "timestamp": "2025-11-23T02:30:11.047820483Z",
     "path": "/tmp/deployment_1704067200"
   }
 }
@@ -910,9 +941,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 1] Dockerfile 찾음",
+  "message": "Dockerfile found",
   "details": {
     "stage": 1,
+    "timestamp": "2025-11-23T02:30:12.047820483Z",
     "path": "/tmp/deployment_1704067200/Dockerfile"
   }
 }
@@ -922,9 +954,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 1] Docker 이미지 빌드 완료",
+  "message": "Docker image build completed",
   "details": {
     "stage": 1,
+    "timestamp": "2025-11-23T02:30:20.047820483Z",
     "imageName": "your-org-your-repo-main-1704067200"
   }
 }
@@ -936,9 +969,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 2] ECR에 이미지 Push 중 - ECR로 이미지 Push 중...",
+  "message": "Pushing image to ECR...",
   "details": {
-    "stage": 2
+    "stage": 2,
+    "timestamp": "2025-11-23T02:30:25.047820483Z"
   }
 }
 ```
@@ -947,9 +981,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 2] ECR 리포지토리 확인 완료",
+  "message": "ECR repository verification completed",
   "details": {
     "stage": 2,
+    "timestamp": "2025-11-23T02:30:26.047820483Z",
     "repository": "your-org-your-repo"
   }
 }
@@ -959,9 +994,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 2] ECR 로그인 완료",
+  "message": "ECR login completed",
   "details": {
-    "stage": 2
+    "stage": 2,
+    "timestamp": "2025-11-23T02:30:27.047820483Z"
   }
 }
 ```
@@ -970,9 +1006,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 2] 이미지 Push 완료",
+  "message": "Image push completed",
   "details": {
     "stage": 2,
+    "timestamp": "2025-11-23T02:30:35.047820483Z",
     "uri": "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/your-org-your-repo:your-org-your-repo-main-1704067200"
   }
 }
@@ -984,9 +1021,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 3] ECS 배포 시작",
+  "message": "Checking and provisioning infrastructure...",
   "details": {
     "stage": 3,
+    "timestamp": "2025-11-23T02:30:40.047820483Z",
     "image": "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/your-org-your-repo:..."
   }
 }
@@ -996,9 +1034,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 3] ECS 서비스 생성 완료",
+  "message": "Infrastructure check and provisioning completed.",
   "details": {
     "stage": 3,
+    "timestamp": "2025-11-23T02:30:50.047820483Z",
     "serviceName": "panda-service",
     "clusterName": "panda-cluster"
   }
@@ -1009,9 +1048,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 3] ECS 서비스 업데이트 완료",
+  "message": "Infrastructure check and provisioning completed.",
   "details": {
     "stage": 3,
+    "timestamp": "2025-11-23T02:30:55.047820483Z",
     "serviceName": "panda-service"
   }
 }
@@ -1023,9 +1063,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 4] CodeDeploy Blue/Green 배포 시작",
+  "message": "Updating Task Definition and starting deployment...",
   "details": {
     "stage": 4,
+    "timestamp": "2025-11-23T02:31:00.047820483Z",
     "image": "..."
   }
 }
@@ -1035,9 +1076,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 4] Blue 서비스 실행 중",
+  "message": "Task Definition update completed.",
   "details": {
     "stage": 4,
+    "timestamp": "2025-11-23T02:31:05.047820483Z",
     "url": "http://blue.example.com"
   }
 }
@@ -1047,9 +1089,10 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 4] Green 서비스 시작 중",
+  "message": "Creating/updating ECS service...",
   "details": {
     "stage": 4,
+    "timestamp": "2025-11-23T02:31:10.047820483Z",
     "url": "http://green.example.com"
   }
 }
@@ -1059,31 +1102,24 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 4] Green 서비스 준비 완료",
+  "message": "Task Definition update completed.",
   "details": {
     "stage": 4,
+    "timestamp": "2025-11-23T02:31:15.047820483Z",
     "url": "http://green.example.com"
   }
 }
 ```
 
-#### Lifecycle Hook
+#### Blue/Green 배포 진행 중
 ```json
 {
   "type": "stage",
-  "message": "[Stage 4] CodeDeploy Lifecycle Hook: BeforeAllowTraffic",
+  "message": "Blue/Green deployment in progress...",
   "details": {
-    "stage": 4
-  }
-}
-```
-
-```json
-{
-  "type": "stage",
-  "message": "[Stage 4] CodeDeploy Lifecycle Hook: AfterAllowTraffic",
-  "details": {
-    "stage": 4
+    "stage": 4,
+    "timestamp": "2025-11-23T02:31:20.047820483Z",
+    "stepFunctionsStage": "CHECK_DEPLOYMENT_IN_PROGRESS"
   }
 }
 ```
@@ -1092,14 +1128,15 @@ eventSource.addEventListener('connected', (event) => {
 ```json
 {
   "type": "stage",
-  "message": "[Stage 4] Green 서비스 배포 완료 - 트래픽 전환 대기 중",
+  "message": "Green environment is being prepared. This may take a few minutes.",
   "details": {
     "stage": 4,
+    "timestamp": "2025-11-23T02:31:25.047820483Z",
+    "stepFunctionsStage": "DEPLOYMENT_READY",
     "blueServiceArn": "arn:aws:ecs:ap-northeast-2:123456789012:service/panda-cluster/panda-blue",
     "greenServiceArn": "arn:aws:ecs:ap-northeast-2:123456789012:service/panda-cluster/panda-green",
     "blueUrl": "http://blue.example.com",
-    "greenUrl": "http://green.example.com",
-    "message": "POST /api/v1/deploy/{deploymentId}/switch를 호출하여 트래픽 전환을 진행하세요"
+    "greenUrl": "http://green.example.com"
   }
 }
 ```
