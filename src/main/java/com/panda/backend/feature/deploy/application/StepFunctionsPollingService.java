@@ -1053,7 +1053,7 @@ public class StepFunctionsPollingService {
     }
 
     /**
-     * SSE 이벤트 발행 헬퍼 메서드
+     * SSE 이벤트 발행 헬퍼 메서드 (stage별 event 전송 전 0.5초 delay 적용)
      */
     private void publishStageEvent(String deploymentId, Integer stage, String message) {
         publishStageEvent(deploymentId, stage, message, Map.of("stage", stage));
@@ -1061,8 +1061,13 @@ public class StepFunctionsPollingService {
 
     private void publishStageEvent(String deploymentId, Integer stage, String message, Map<String, Object> details) {
         try {
+            // ✅ Stage event 발행 전 0.5초 delay
+            Thread.sleep(500);
             eventPublisher.publishStageEvent(deploymentId, stage,
                 String.format("[Stage %d] %s", stage, message), details);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.debug("Stage event publishing interrupted", e);
         } catch (Exception e) {
             log.debug("Failed to publish stage event", e);
         }
